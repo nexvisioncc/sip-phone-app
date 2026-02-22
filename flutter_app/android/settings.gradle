@@ -1,0 +1,4 @@
+include ':app'
+
+// This file is intentionally minimal.
+// Module inclusion is handled by Flutter's gradle integration.
