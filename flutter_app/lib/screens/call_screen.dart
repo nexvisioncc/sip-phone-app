@@ -25,6 +25,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   bool _isMuted = false;
   bool _isSpeaker = false;
   bool _isRecording = false;
+  bool _isEnding = false;
   String _callStatus = 'Calling...';
   Duration _callDuration = Duration.zero;
   Timer? _callTimer;
@@ -100,6 +101,8 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   }
 
   void _handleCallEnded() {
+    if (_isEnding) return;
+    _isEnding = true;
     _callTimer?.cancel();
     if (_isRecording) _stopRecording();
     Future.delayed(const Duration(milliseconds: 500), () {
@@ -126,7 +129,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
 
   void _hangup() {
     _sipService.hangup();
-    Navigator.of(context).pop();
+    _handleCallEnded(); // let the guarded handler pop the screen
   }
 
   @override

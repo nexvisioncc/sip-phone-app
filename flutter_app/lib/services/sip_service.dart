@@ -3,6 +3,11 @@ import 'package:logger/logger.dart';
 import '../config/constants.dart';
 
 class SipService implements SipUaHelperListener {
+  // Singleton — all screens share the same instance and the same SIP connection
+  static final SipService _instance = SipService._internal();
+  factory SipService() => _instance;
+  SipService._internal();
+
   final SIPUAHelper _helper = SIPUAHelper();
   final Logger _logger = Logger();
 
@@ -13,11 +18,12 @@ class SipService implements SipUaHelperListener {
   Function(RegistrationState)? onRegistrationStateChanged;
 
   SIPUAHelper get helper => _helper;
-  
+
   Future<void> register({
     required String username,
     required String password,
   }) async {
+    _helper.stop();
     final settings = UaSettings()
       ..webSocketUrl = SipConfig.websocketUrl
       ..uri = 'sip:$username@${SipConfig.domain}'
@@ -26,10 +32,11 @@ class SipService implements SipUaHelperListener {
       ..displayName = username
       ..userAgent = SipConfig.userAgent
       ..register_expires = SipConfig.registerExpires;
-    
+
     _logger.i('Registering SIP user: $username');
-    _helper.start(settings);
+    _helper.removeSipUaHelperListener(this);
     _helper.addSipUaHelperListener(this);
+    _helper.start(settings);
   }
   
   void unregister() {

@@ -9,7 +9,7 @@ class ApiConfig {
 // SIP Configuration
 class SipConfig {
   static const String domain = 'sip.nexvision.cc';
-  static const String websocketUrl = 'wss://sip-ws.nexvision.cc:5062';
+  static const String websocketUrl = 'wss://sip-ws.nexvision.cc';
   static const int registerExpires = 300;
   static const String userAgent = 'Nexvision SIP Phone/1.0';
 }

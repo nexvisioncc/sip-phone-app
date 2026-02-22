@@ -129,6 +129,7 @@ class DialerScreen extends ConsumerWidget {
                     digit: '0',
                     subtext: '+',
                     onPressed: () => ref.read(dialedNumberProvider.notifier).add('0'),
+                    onLongPress: () => ref.read(dialedNumberProvider.notifier).add('+'),
                   ),
                   _NumpadButton(
                     digit: '#',
@@ -167,11 +168,13 @@ class _NumpadButton extends StatelessWidget {
   final String digit;
   final String subtext;
   final VoidCallback onPressed;
+  final VoidCallback? onLongPress;
 
   const _NumpadButton({
     required this.digit,
     required this.subtext,
     required this.onPressed,
+    this.onLongPress,
   });
 
   @override
@@ -182,6 +185,7 @@ class _NumpadButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(16),
       child: InkWell(
         onTap: onPressed,
+        onLongPress: onLongPress,
         borderRadius: BorderRadius.circular(16),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,

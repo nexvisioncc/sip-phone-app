@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/constants.dart';
 import '../services/background_service.dart';
+import '../services/sip_service.dart';
 
 final settingsProvider = StateNotifierProvider<SettingsNotifier, SettingsState>((ref) {
   return SettingsNotifier();
@@ -63,9 +64,11 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    final username = prefs.getString('sip_username') ?? '';
+    final password = prefs.getString('sip_password') ?? '';
     state = SettingsState(
-      sipUsername: prefs.getString('sip_username') ?? '',
-      sipPassword: prefs.getString('sip_password') ?? '',
+      sipUsername: username,
+      sipPassword: password,
       sipDomain: prefs.getString('sip_domain') ?? 'sip.nexvision.cc',
       displayName: prefs.getString('display_name') ?? '',
       apiUrl: prefs.getString('api_url') ?? 'https://sip-api.nexvision.cc',
@@ -74,6 +77,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       runInBackground: prefs.getBool('run_in_background') ?? false,
       showIncomingNotification: prefs.getBool('show_incoming_notification') ?? true,
     );
+    // Auto-register SIP on startup if credentials are saved
+    if (username.isNotEmpty) {
+      SipService().register(username: username, password: password);
+    }
   }
 
   Future<void> saveSettings(SettingsState newState) async {
@@ -88,6 +95,13 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setBool('run_in_background', newState.runInBackground);
     await prefs.setBool('show_incoming_notification', newState.showIncomingNotification);
     state = newState;
+    // Re-register SIP when credentials change
+    if (newState.sipUsername.isNotEmpty) {
+      SipService().register(
+        username: newState.sipUsername,
+        password: newState.sipPassword,
+      );
+    }
   }
 }
 
