@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- Internet and Network -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -78,7 +79,8 @@
         <receiver
             android:name="com.hiennv.flutter_callkit_incoming.CallkitIncomingBroadcastReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="false"
+            tools:replace="android:exported">
             <intent-filter>
                 <action android:name="com.hiennv.flutter_callkit_incoming.ACTION_CALL_INCOMING" />
                 <action android:name="com.hiennv.flutter_callkit_incoming.ACTION_CALL_ACCEPT" />

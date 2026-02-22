@@ -5,10 +5,13 @@ import '../config/constants.dart';
 class SipService implements SipUaHelperListener {
   final SIPUAHelper _helper = SIPUAHelper();
   final Logger _logger = Logger();
-  
+
+  Call? _activeCall;
+  bool _isMuted = false;
+
   Function(CallState)? onCallStateChanged;
   Function(RegistrationState)? onRegistrationStateChanged;
-  
+
   SIPUAHelper get helper => _helper;
   
   Future<void> register({
@@ -42,24 +45,23 @@ class SipService implements SipUaHelperListener {
   
   void hangup() {
     _logger.i('Hanging up');
-    _helper.terminateSessions();
+    _helper.terminateSessions({});
   }
-  
+
   void toggleMute() {
-    final call = _helper.calls.values.firstOrNull;
-    if (call != null) {
-      call.mute(true);
+    if (_activeCall != null) {
+      _isMuted = !_isMuted;
+      _activeCall!.mute(_isMuted);
     }
   }
-  
+
   void toggleSpeaker() {
     // Implemented via webrtc_service
   }
-  
+
   void sendDTMF(String tone) {
-    final call = _helper.calls.values.firstOrNull;
-    if (call != null) {
-      call.sendDTMF(tone);
+    if (_activeCall != null) {
+      _activeCall!.sendDTMF(tone);
     }
   }
   
@@ -73,6 +75,12 @@ class SipService implements SipUaHelperListener {
   @override
   void callStateChanged(Call call, CallState state) {
     _logger.i('Call state: ${state.state}');
+    if (state.state == CallStateEnum.ENDED || state.state == CallStateEnum.FAILED) {
+      _activeCall = null;
+      _isMuted = false;
+    } else {
+      _activeCall = call;
+    }
     onCallStateChanged?.call(state);
   }
   

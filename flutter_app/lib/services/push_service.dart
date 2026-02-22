@@ -1,5 +1,6 @@
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
+import 'package:flutter_callkit_incoming/entities/entities.dart';
 import 'package:logger/logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/constants.dart';
@@ -96,24 +97,26 @@ class PushService {
     await FlutterCallkitIncoming.showCallkitIncoming(params);
   }
   
-  void _handleCallKitEvent(dynamic event) {
+  void _handleCallKitEvent(CallEvent? event) {
     if (event == null) return;
-    
+
     switch (event.event) {
-      case 'ACCEPT':
+      case Event.actionCallAccept:
         _logger.i('Call accepted');
-        // Trigger SIP registration and answer
+        final body = event.body as Map<String, dynamic>;
         onIncomingCall?.call(
-          event.body['id'],
-          event.body['nameCaller'],
-          event.body['handle'],
+          body['id'] as String,
+          body['nameCaller'] as String,
+          body['handle'] as String,
         );
         break;
-      case 'DECLINE':
+      case Event.actionCallDecline:
         _logger.i('Call declined');
         break;
-      case 'ENDED':
+      case Event.actionCallEnded:
         _logger.i('Call ended');
+        break;
+      default:
         break;
     }
   }
