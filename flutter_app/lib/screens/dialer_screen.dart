@@ -57,7 +57,7 @@ class DialerScreen extends ConsumerWidget {
               child: Padding(
                 padding: const EdgeInsets.only(right: 32),
                 child: IconButton(
-                  icon: const Icon(Icons.backspace, color: Colors.grey),
+                  icon: Icon(Icons.backspace, color: Theme.of(context).colorScheme.onSurfaceVariant),
                   onPressed: () => ref.read(dialedNumberProvider.notifier).backspace(),
                 ),
               ),
@@ -176,8 +176,9 @@ class _NumpadButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Material(
-      color: Colors.grey.shade100,
+      color: colorScheme.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(16),
       child: InkWell(
         onTap: onPressed,
@@ -189,13 +190,14 @@ class _NumpadButton extends StatelessWidget {
               digit,
               style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                 fontWeight: FontWeight.w600,
+                color: colorScheme.onSurface,
               ),
             ),
             if (subtext.isNotEmpty)
               Text(
                 subtext,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Colors.grey,
+                  color: colorScheme.onSurfaceVariant,
                 ),
               ),
           ],
