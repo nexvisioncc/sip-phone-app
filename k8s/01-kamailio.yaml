@@ -1,0 +1,199 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kamailio-config
+  namespace: sip-phone
+data:
+  kamailio.cfg: |
+    #!KAMAILIO
+    
+    # Basic configuration for SIP proxy
+    # Listens on UDP/TCP/TLS/WebSocket
+    
+    # Core settings
+    debug=2
+    log_stderror=no
+    memdbg=5
+    memlog=5
+    
+    # Fork settings
+    fork=yes
+    children=4
+    
+    # Listen interfaces
+    listen=udp:0.0.0.0:5060
+    listen=tcp:0.0.0.0:5060
+    listen=tls:0.0.0.0:5061
+    listen=ws:0.0.0.0:5062
+    listen=wss:0.0.0.0:5063
+    
+    # SIP domains
+    alias="sip.nexvision.cc"
+    
+    # Modules
+    loadmodule "db_postgres.so"
+    loadmodule "sl.so"
+    loadmodule "tm.so"
+    loadmodule "rr.so"
+    loadmodule "pv.so"
+    loadmodule "maxfwd.so"
+    loadmodule "usrloc.so"
+    loadmodule "registrar.so"
+    loadmodule "textops.so"
+    loadmodule "siputils.so"
+    loadmodule "xlog.so"
+    loadmodule "acc.so"
+    loadmodule "auth.so"
+    loadmodule "auth_db.so"
+    loadmodule "nathelper.so"
+    loadmodule "rtpengine.so"
+    loadmodule "websocket.so"
+    loadmodule "tls.so"
+    
+    # Module parameters
+    modparam("usrloc", "db_mode", 0)
+    modparam("registrar", "default_expires", 300)
+    modparam("nathelper", "natping_interval", 30)
+    modparam("websocket", "keepalive_interval", 30)
+    
+    # Routing logic
+    request_route {
+        # Per request initial checks
+        xlog("L_INFO", "Request $rm from $fu to $ru\\n");
+        
+        # Max forwards check
+        if (!mf_process_maxfwd_header("10")) {
+            sl_send_reply("483","Too Many Hops");
+            exit;
+        }
+        
+        # WebSocket handling
+        if (proto == WS || proto == WSS) {
+            # WebSocket connection
+            xlog("L_INFO", "WebSocket request received\\n");
+        }
+        
+        # Handle registrations
+        if (is_method("REGISTER")) {
+            handle_registration();
+            exit;
+        }
+        
+        # Handle INVITE
+        if (is_method("INVITE")) {
+            handle_invite();
+            exit;
+        }
+        
+        # Handle other requests
+        route(RELAY);
+    }
+    
+    route[RELAY] {
+        if (!t_relay()) {
+            sl_reply_error();
+        }
+        exit;
+    }
+    
+    route[handle_registration] {
+        if (!save("location")) {
+            sl_reply_error();
+        }
+        exit;
+    }
+    
+    route[handle_invite] {
+        # Lookup destination in location table
+        if (lookup("location")) {
+            t_relay();
+        } else {
+            # Try to notify via push notification
+            # This would integrate with your backend API
+            sl_send_reply("480", "Temporarily Unavailable - Push sent");
+        }
+        exit;
+    }
+    
+    onreply_route {
+        xlog("L_INFO", "Reply $rs $rr from $fu\\n");
+    }
+    
+    failure_route {
+        xlog("L_INFO", "Failure route for $rm\\n");
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kamailio
+  namespace: sip-phone
+spec:
+  serviceName: kamailio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kamailio
+  template:
+    metadata:
+      labels:
+        app: kamailio
+    spec:
+      containers:
+      - name: kamailio
+        image: kamailio/kamailio:5.7
+        ports:
+        - containerPort: 5060
+          protocol: UDP
+          name: sip-udp
+        - containerPort: 5060
+          name: sip-tcp
+        - containerPort: 5061
+          name: sip-tls
+        - containerPort: 5062
+          name: sip-ws
+        - containerPort: 5063
+          name: sip-wss
+        volumeMounts:
+        - name: config
+          mountPath: /etc/kamailio/kamailio.cfg
+          subPath: kamailio.cfg
+        command:
+        - kamailio
+        - -DD
+        - -E
+        - -f
+        - /etc/kamailio/kamailio.cfg
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+      volumes:
+      - name: config
+        configMap:
+          name: kamailio-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kamailio
+  namespace: sip-phone
+spec:
+  selector:
+    app: kamailio
+  ports:
+  - name: sip-udp
+    port: 5060
+    protocol: UDP
+  - name: sip-tcp
+    port: 5060
+  - name: sip-tls
+    port: 5061
+  - name: sip-ws
+    port: 5062
+  - name: sip-wss
+    port: 5063
+  type: NodePort

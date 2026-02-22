@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sip-api
+  namespace: sip-phone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sip-api
+  template:
+    metadata:
+      labels:
+        app: sip-api
+    spec:
+      containers:
+      - name: api
+        image: node:20-alpine
+        workingDir: /app
+        command:
+        - sh
+        - -c
+        - |
+          echo 'Starting SIP API server...'
+          cat > package.json << 'EOF'
+          {
+            "name": "sip-api",
+            "version": "1.0.0",
+            "dependencies": {
+              "express": "^4.18.2",
+              "firebase-admin": "^12.0.0"
+            }
+          }
+          EOF
+          npm install
+          cat > server.js << 'EOF'
+          const express = require('express');
+          const admin = require('firebase-admin');
+          
+          const app = express();
+          app.use(express.json());
+          
+          // Initialize Firebase
+          try {
+            admin.initializeApp({
+              credential: admin.credential.cert(require(process.env.GOOGLE_APPLICATION_CREDENTIALS))
+            });
+            console.log('Firebase initialized');
+          } catch (e) {
+            console.error('Firebase init error:', e.message);
+          }
+          
+          const messaging = admin.messaging ? admin.messaging() : null;
+          
+          // Health check
+          app.get('/health', (req, res) => {
+            res.json({ status: 'ok', timestamp: new Date().toISOString() });
+          });
+          
+          // Register device
+          app.post('/devices', async (req, res) => {
+            const { fcm_token, platform } = req.body;
+            console.log('Device registered:', { fcm_token: fcm_token?.slice(0, 20) + '...', platform });
+            res.json({ success: true });
+          });
+          
+          // Send push notification (for testing)
+          app.post('/push/send', async (req, res) => {
+            try {
+              if (!messaging) {
+                return res.status(500).json({ error: 'Firebase not initialized' });
+              }
+              const { token, title, body, data } = req.body;
+              const message = {
+                token,
+                notification: { title, body },
+                data: data || {},
+                android: {
+                  priority: 'high',
+                  notification: {
+                    channelId: 'sip_calls_channel',
+                    priority: 'high'
+                  }
+                }
+              };
+              const response = await messaging.send(message);
+              res.json({ success: true, messageId: response });
+            } catch (error) {
+              console.error('Push error:', error);
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          // Get SIP credentials
+          app.get('/users/:userId/sip-credentials', (req, res) => {
+            res.json({
+              username: 'test-user',
+              password: 'test-pass',
+              domain: 'sip.nexvision.cc'
+            });
+          });
+          
+          const PORT = process.env.PORT || 3000;
+          app.listen(PORT, '0.0.0.0', () => {
+            console.log(`SIP API server running on port ${PORT}`);
+          });
+          EOF
+          node server.js
+        ports:
+        - containerPort: 3000
+        env:
+        - name: PORT
+          value: "3000"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /secrets/firebase-service-account.json
+        volumeMounts:
+        - name: firebase-secret
+          mountPath: /secrets
+          readOnly: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+      volumes:
+      - name: firebase-secret
+        secret:
+          secretName: firebase-service-account
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sip-api
+  namespace: sip-phone
+spec:
+  selector:
+    app: sip-api
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: ClusterIP
