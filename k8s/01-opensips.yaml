@@ -1,3 +1,107 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensips-config
+  namespace: sip-phone
+data:
+  opensips.cfg: |
+    ####### Global Parameters #########
+
+    log_level=2
+    stderror_enabled=yes
+    udp_workers=2
+
+    socket=udp:0.0.0.0:5060
+    socket=ws:0.0.0.0:8080
+
+    alias="sip.nexvision.cc"
+
+    ####### Modules Section ########
+
+    mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+
+    loadmodule "proto_udp.so"
+    loadmodule "proto_ws.so"
+    loadmodule "signaling.so"
+    loadmodule "sl.so"
+    loadmodule "tm.so"
+    modparam("tm", "fr_timeout", 5)
+    modparam("tm", "fr_inv_timeout", 30)
+    loadmodule "rr.so"
+    modparam("rr", "append_fromtag", 0)
+    loadmodule "maxfwd.so"
+    loadmodule "sipmsgops.so"
+    loadmodule "usrloc.so"
+    modparam("usrloc", "working_mode_preset", "single-instance-no-db")
+    loadmodule "registrar.so"
+    modparam("registrar", "default_expires", 600)
+    loadmodule "nathelper.so"
+    modparam("nathelper", "natping_interval", 30)
+
+    ####### Routing Logic ########
+
+    route {
+        xlog("L_INFO", "[$ci] $rm $ru from $fU\n");
+
+        if (!mf_process_maxfwd_header(10)) {
+            send_reply(483, "Too Many Hops");
+            exit;
+        }
+
+        # In-dialog: handle ACK and loose-route
+        if (has_totag()) {
+            if (is_method("ACK") && t_check_trans()) {
+                t_relay();
+                exit;
+            }
+            if (!loose_route()) {
+                send_reply(404, "Not here");
+                exit;
+            }
+            route(relay);
+            exit;
+        }
+
+        t_check_trans();
+
+        if (is_method("CANCEL")) {
+            if (t_check_trans()) t_relay();
+            exit;
+        }
+
+        # SIP registration from Flutter app (WebSocket)
+        # No auth challenge - single-user private server
+        if (is_method("REGISTER")) {
+            fix_nated_register();
+            if (!save("location")) {
+                xlog("L_ERR", "[$ci] Failed to save location for $tu\n");
+            }
+            xlog("L_INFO", "[$ci] Registered $fU\n");
+            exit;
+        }
+
+        # Incoming INVITE (from Twilio via UDP)
+        if (is_method("INVITE")) {
+            record_route();
+            if (!lookup("location", "method-filtering")) {
+                send_reply(404, "User Not Found");
+                exit;
+            }
+            route(relay);
+            exit;
+        }
+
+        route(relay);
+    }
+
+    route[relay] {
+        if (!t_relay()) {
+            send_reply(500, "Internal Error");
+        }
+        exit;
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,11 +126,15 @@ spec:
           name: sip-udp
         - containerPort: 5060
           name: sip-tcp
-        - containerPort: 5061
-          name: sip-tls
+        - containerPort: 8080
+          name: sip-ws
         command:
         - opensips
         - -F
+        volumeMounts:
+        - name: config
+          mountPath: /etc/opensips/opensips.cfg
+          subPath: opensips.cfg
         resources:
           requests:
             memory: "64Mi"
@@ -34,6 +142,10 @@ spec:
           limits:
             memory: "128Mi"
             cpu: "200m"
+      volumes:
+      - name: config
+        configMap:
+          name: opensips-config
 ---
 apiVersion: v1
 kind: Service
@@ -51,7 +163,7 @@ spec:
   - name: sip-tcp
     port: 5060
     nodePort: 30060
-  - name: sip-tls
-    port: 5061
-    nodePort: 30061
+  - name: sip-ws
+    port: 8080
+    targetPort: 8080
   type: NodePort

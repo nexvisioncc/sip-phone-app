@@ -36,6 +36,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/websocket-services: "opensips"
 spec:
   ingressClassName: nginx
   tls:
@@ -50,6 +51,6 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: sip-api
+            name: opensips
             port:
-              number: 80
+              number: 8080
