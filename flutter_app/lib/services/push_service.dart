@@ -68,6 +68,11 @@ class PushService {
   }
   
   Future<void> _showIncomingCall(Map<String, dynamic> data) async {
+    // Respect the user's notification preference
+    final prefs = await SharedPreferences.getInstance();
+    final showNotification = prefs.getBool('show_incoming_notification') ?? true;
+    if (!showNotification) return;
+
     final params = CallKitParams(
       id: data['call_id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
       nameCaller: data['caller_name'] ?? 'Unknown',

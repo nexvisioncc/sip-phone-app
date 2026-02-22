@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/constants.dart';
+import '../services/background_service.dart';
 
 final settingsProvider = StateNotifierProvider<SettingsNotifier, SettingsState>((ref) {
   return SettingsNotifier();
@@ -14,6 +15,9 @@ class SettingsState {
   final String displayName;
   final String apiUrl;
   final String wsUrl;
+  final bool autoRecord;
+  final bool runInBackground;
+  final bool showIncomingNotification;
 
   SettingsState({
     this.sipUsername = '',
@@ -22,6 +26,9 @@ class SettingsState {
     this.displayName = '',
     this.apiUrl = 'https://sip-api.nexvision.cc',
     this.wsUrl = 'wss://sip-ws.nexvision.cc',
+    this.autoRecord = false,
+    this.runInBackground = false,
+    this.showIncomingNotification = true,
   });
 
   SettingsState copyWith({
@@ -31,6 +38,9 @@ class SettingsState {
     String? displayName,
     String? apiUrl,
     String? wsUrl,
+    bool? autoRecord,
+    bool? runInBackground,
+    bool? showIncomingNotification,
   }) {
     return SettingsState(
       sipUsername: sipUsername ?? this.sipUsername,
@@ -39,6 +49,9 @@ class SettingsState {
       displayName: displayName ?? this.displayName,
       apiUrl: apiUrl ?? this.apiUrl,
       wsUrl: wsUrl ?? this.wsUrl,
+      autoRecord: autoRecord ?? this.autoRecord,
+      runInBackground: runInBackground ?? this.runInBackground,
+      showIncomingNotification: showIncomingNotification ?? this.showIncomingNotification,
     );
   }
 }
@@ -57,6 +70,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       displayName: prefs.getString('display_name') ?? '',
       apiUrl: prefs.getString('api_url') ?? 'https://sip-api.nexvision.cc',
       wsUrl: prefs.getString('ws_url') ?? 'wss://sip-ws.nexvision.cc',
+      autoRecord: prefs.getBool('auto_record') ?? false,
+      runInBackground: prefs.getBool('run_in_background') ?? false,
+      showIncomingNotification: prefs.getBool('show_incoming_notification') ?? true,
     );
   }
 
@@ -68,6 +84,9 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setString('display_name', newState.displayName);
     await prefs.setString('api_url', newState.apiUrl);
     await prefs.setString('ws_url', newState.wsUrl);
+    await prefs.setBool('auto_record', newState.autoRecord);
+    await prefs.setBool('run_in_background', newState.runInBackground);
+    await prefs.setBool('show_incoming_notification', newState.showIncomingNotification);
     state = newState;
   }
 }
@@ -80,11 +99,7 @@ class SettingsScreen extends ConsumerWidget {
     final settings = ref.watch(settingsProvider);
     final notifier = ref.read(settingsProvider.notifier);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Settings'),
-      ),
-      body: SingleChildScrollView(
+    return SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -152,6 +167,74 @@ class SettingsScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 24),
 
+            // Call Recording Section
+            _SectionHeader(
+              icon: Icons.fiber_manual_record,
+              title: 'Call Recording',
+              subtitle: 'Recordings are saved locally on this device',
+            ),
+            const SizedBox(height: 16),
+            _SettingsCard(
+              children: [
+                SwitchListTile(
+                  title: const Text('Auto-record all calls'),
+                  subtitle: const Text('Automatically record incoming & outgoing calls'),
+                  value: settings.autoRecord,
+                  onChanged: (v) => notifier.saveSettings(settings.copyWith(autoRecord: v)),
+                  secondary: Icon(
+                    Icons.mic,
+                    color: settings.autoRecord ? Colors.red : Colors.grey,
+                  ),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+
+            // Notifications & Background Section
+            _SectionHeader(
+              icon: Icons.notifications_active,
+              title: 'Notifications & Background',
+              subtitle: 'Control background behavior and call alerts',
+            ),
+            const SizedBox(height: 16),
+            _SettingsCard(
+              children: [
+                SwitchListTile(
+                  title: const Text('Run in background'),
+                  subtitle: const Text('Keep app alive to receive calls when minimized'),
+                  value: settings.runInBackground,
+                  onChanged: (v) async {
+                    await notifier.saveSettings(settings.copyWith(runInBackground: v));
+                    if (v) {
+                      await BackgroundServiceManager.startService();
+                    } else {
+                      await BackgroundServiceManager.stopService();
+                    }
+                  },
+                  secondary: Icon(
+                    Icons.phone_in_talk,
+                    color: settings.runInBackground ? Colors.green : Colors.grey,
+                  ),
+                  contentPadding: EdgeInsets.zero,
+                ),
+                SwitchListTile(
+                  title: const Text('Incoming call notifications'),
+                  subtitle: const Text('Show popup for incoming calls'),
+                  value: settings.showIncomingNotification,
+                  onChanged: (v) => notifier.saveSettings(
+                    settings.copyWith(showIncomingNotification: v),
+                  ),
+                  secondary: Icon(
+                    Icons.notifications,
+                    color: settings.showIncomingNotification ? Colors.blue : Colors.grey,
+                  ),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+
             // Quick Actions
             _SectionHeader(
               icon: Icons.bolt,
@@ -203,7 +286,6 @@ class SettingsScreen extends ConsumerWidget {
             ),
           ],
         ),
-      ),
     );
   }
 

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/sip_service.dart';
 import 'call_screen.dart';
-import 'settings_screen.dart';
 
 final dialedNumberProvider = StateNotifierProvider<DialedNumberNotifier, String>((ref) {
   return DialedNumberNotifier();
@@ -36,21 +35,7 @@ class DialerScreen extends ConsumerWidget {
     final number = ref.watch(dialedNumberProvider);
     final sipService = SipService();
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Nexvision SIP'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-          ),
-        ],
-      ),
-      body: Column(
+    return Column(
         children: [
           // Number display
           Container(
@@ -174,7 +159,6 @@ class DialerScreen extends ConsumerWidget {
             ),
           ),
         ],
-      ),
     );
   }
 }

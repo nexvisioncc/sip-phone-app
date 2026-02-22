@@ -40,7 +40,13 @@ dependencies:
   
   # Audio
   audio_session: ^0.1.18
-  
+  flutter_sound: ^9.6.3
+  just_audio: ^0.9.40
+  path_provider: ^2.1.3
+
+  # Background service
+  flutter_background_service: ^5.0.5
+
   # Utils
   uuid: ^4.2.2
   intl: ^0.19.0

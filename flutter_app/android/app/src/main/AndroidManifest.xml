@@ -25,6 +25,7 @@
     <!-- Notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     
     <!-- Bluetooth for audio devices -->
     <uses-permission android:name="android.permission.BLUETOOTH" />

@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../services/sip_service.dart';
 import '../services/push_service.dart';
-import 'dialer_screen.dart';
+import 'main_screen.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -26,7 +25,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
     // Navigate to dialer after init
     if (mounted) {
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const DialerScreen()),
+        MaterialPageRoute(builder: (_) => const MainScreen()),
       );
     }
   }

@@ -36,39 +36,44 @@ spec:
           cat > server.js << 'EOF'
           const express = require('express');
           const admin = require('firebase-admin');
-          
+
           const app = express();
           app.use(express.json());
-          
-          // Initialize Firebase
+
+          // Initialize Firebase — gracefully skip if credentials are missing/invalid
+          let firebaseReady = false;
           try {
-            admin.initializeApp({
-              credential: admin.credential.cert(require(process.env.GOOGLE_APPLICATION_CREDENTIALS))
-            });
+            const sa = require(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+            admin.initializeApp({ credential: admin.credential.cert(sa) });
+            firebaseReady = true;
             console.log('Firebase initialized');
           } catch (e) {
-            console.error('Firebase init error:', e.message);
+            console.warn('Firebase skipped:', e.message);
           }
-          
-          const messaging = admin.messaging ? admin.messaging() : null;
-          
+
+          function getMessaging() {
+            if (!firebaseReady) return null;
+            try { return admin.messaging(); } catch (e) { return null; }
+          }
+
           // Health check
           app.get('/health', (req, res) => {
-            res.json({ status: 'ok', timestamp: new Date().toISOString() });
+            res.json({ status: 'ok', timestamp: new Date().toISOString(), firebase: firebaseReady });
           });
-          
+
           // Register device
           app.post('/devices', async (req, res) => {
             const { fcm_token, platform } = req.body;
             console.log('Device registered:', { fcm_token: fcm_token?.slice(0, 20) + '...', platform });
             res.json({ success: true });
           });
-          
-          // Send push notification (for testing)
+
+          // Send push notification
           app.post('/push/send', async (req, res) => {
             try {
+              const messaging = getMessaging();
               if (!messaging) {
-                return res.status(500).json({ error: 'Firebase not initialized' });
+                return res.status(503).json({ error: 'Firebase not initialized' });
               }
               const { token, title, body, data } = req.body;
               const message = {
@@ -77,10 +82,7 @@ spec:
                 data: data || {},
                 android: {
                   priority: 'high',
-                  notification: {
-                    channelId: 'sip_calls_channel',
-                    priority: 'high'
-                  }
+                  notification: { channelId: 'sip_calls_channel', priority: 'high' }
                 }
               };
               const response = await messaging.send(message);
@@ -90,19 +92,15 @@ spec:
               res.status(500).json({ error: error.message });
             }
           });
-          
+
           // Get SIP credentials
           app.get('/users/:userId/sip-credentials', (req, res) => {
-            res.json({
-              username: 'test-user',
-              password: 'test-pass',
-              domain: 'sip.nexvision.cc'
-            });
+            res.json({ username: 'test-user', password: 'test-pass', domain: 'sip.nexvision.cc' });
           });
-          
+
           const PORT = process.env.PORT || 3000;
           app.listen(PORT, '0.0.0.0', () => {
-            console.log(`SIP API server running on port ${PORT}`);
+            console.log('SIP API server running on port ' + PORT);
           });
           EOF
           node server.js
