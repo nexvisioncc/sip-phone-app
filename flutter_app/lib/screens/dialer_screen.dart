@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/sip_service.dart';
 import 'call_screen.dart';
+import 'settings_screen.dart';
 
 final dialedNumberProvider = StateNotifierProvider<DialedNumberNotifier, String>((ref) {
   return DialedNumberNotifier();
@@ -42,7 +43,9 @@ class DialerScreen extends ConsumerWidget {
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () {
-              // Navigate to settings
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
             },
           ),
         ],
