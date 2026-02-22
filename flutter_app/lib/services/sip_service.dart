@@ -1,0 +1,93 @@
+import 'package:sip_ua/sip_ua.dart';
+import 'package:logger/logger.dart';
+import '../config/constants.dart';
+
+class SipService implements SipUaHelperListener {
+  final SIPUAHelper _helper = SIPUAHelper();
+  final Logger _logger = Logger();
+  
+  Function(CallState)? onCallStateChanged;
+  Function(RegistrationState)? onRegistrationStateChanged;
+  
+  SIPUAHelper get helper => _helper;
+  
+  Future<void> register({
+    required String username,
+    required String password,
+  }) async {
+    final settings = UaSettings()
+      ..webSocketUrl = SipConfig.websocketUrl
+      ..uri = 'sip:$username@${SipConfig.domain}'
+      ..authorizationUser = username
+      ..password = password
+      ..displayName = username
+      ..userAgent = SipConfig.userAgent
+      ..register_expires = SipConfig.registerExpires;
+    
+    _logger.i('Registering SIP user: $username');
+    _helper.start(settings);
+    _helper.addSipUaHelperListener(this);
+  }
+  
+  void unregister() {
+    _logger.i('Unregistering SIP');
+    _helper.stop();
+  }
+  
+  void call(String number) {
+    final target = 'sip:$number@${SipConfig.domain}';
+    _logger.i('Calling: $target');
+    _helper.call(target, voiceonly: true);
+  }
+  
+  void hangup() {
+    _logger.i('Hanging up');
+    _helper.terminateSessions();
+  }
+  
+  void toggleMute() {
+    final call = _helper.calls.values.firstOrNull;
+    if (call != null) {
+      call.mute(true);
+    }
+  }
+  
+  void toggleSpeaker() {
+    // Implemented via webrtc_service
+  }
+  
+  void sendDTMF(String tone) {
+    final call = _helper.calls.values.firstOrNull;
+    if (call != null) {
+      call.sendDTMF(tone);
+    }
+  }
+  
+  // SipUaHelperListener implementations
+  @override
+  void registrationStateChanged(RegistrationState state) {
+    _logger.i('Registration state: ${state.state}');
+    onRegistrationStateChanged?.call(state);
+  }
+  
+  @override
+  void callStateChanged(Call call, CallState state) {
+    _logger.i('Call state: ${state.state}');
+    onCallStateChanged?.call(state);
+  }
+  
+  @override
+  void transportStateChanged(TransportState state) {
+    _logger.i('Transport state: ${state.state}');
+  }
+  
+  @override
+  void onNewMessage(SIPMessageRequest msg) {
+    _logger.i('New message: ${msg.message}');
+  }
+  
+  @override
+  void onNewNotify(Notify ntf) {
+    _logger.i('New notify: $ntf');
+  }
+}
