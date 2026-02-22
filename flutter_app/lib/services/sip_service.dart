@@ -1,4 +1,5 @@
 import 'package:sip_ua/sip_ua.dart';
+import 'package:sip_ua/src/transport_type.dart';
 import 'package:logger/logger.dart';
 import '../config/constants.dart';
 
@@ -25,6 +26,7 @@ class SipService implements SipUaHelperListener {
   }) async {
     _helper.stop();
     final settings = UaSettings()
+      ..transportType = TransportType.WS
       ..webSocketUrl = SipConfig.websocketUrl
       ..uri = 'sip:$username@${SipConfig.domain}'
       ..authorizationUser = username

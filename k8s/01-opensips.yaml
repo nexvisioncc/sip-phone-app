@@ -23,6 +23,7 @@ data:
 
     loadmodule "proto_udp.so"
     loadmodule "proto_ws.so"
+    modparam("proto_ws", "require_origin", 0)
     loadmodule "signaling.so"
     loadmodule "sl.so"
     loadmodule "tm.so"
