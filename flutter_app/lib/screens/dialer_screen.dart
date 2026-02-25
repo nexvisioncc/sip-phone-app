@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/sip_service.dart';
-import 'call_screen.dart';
 
 final dialedNumberProvider = StateNotifierProvider<DialedNumberNotifier, String>((ref) {
   return DialedNumberNotifier();
@@ -9,22 +8,16 @@ final dialedNumberProvider = StateNotifierProvider<DialedNumberNotifier, String>
 
 class DialedNumberNotifier extends StateNotifier<String> {
   DialedNumberNotifier() : super('');
-  
+
   void add(String digit) {
-    if (state.length < 15) {
-      state = state + digit;
-    }
+    if (state.length < 15) state = state + digit;
   }
-  
+
   void backspace() {
-    if (state.isNotEmpty) {
-      state = state.substring(0, state.length - 1);
-    }
+    if (state.isNotEmpty) state = state.substring(0, state.length - 1);
   }
-  
-  void clear() {
-    state = '';
-  }
+
+  void clear() => state = '';
 }
 
 class DialerScreen extends ConsumerWidget {
@@ -33,7 +26,6 @@ class DialerScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final number = ref.watch(dialedNumberProvider);
-    final sipService = SipService();
 
     return Column(
         children: [
@@ -49,7 +41,7 @@ class DialerScreen extends ConsumerWidget {
               ),
             ),
           ),
-          
+
           // Backspace button
           if (number.isNotEmpty)
             Align(
@@ -62,9 +54,9 @@ class DialerScreen extends ConsumerWidget {
                 ),
               ),
             ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Numpad
           Expanded(
             child: Padding(
@@ -75,87 +67,41 @@ class DialerScreen extends ConsumerWidget {
                 mainAxisSpacing: 12,
                 crossAxisSpacing: 12,
                 children: [
-                  _NumpadButton(
-                    digit: '1',
-                    subtext: '',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('1'),
-                  ),
-                  _NumpadButton(
-                    digit: '2',
-                    subtext: 'ABC',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('2'),
-                  ),
-                  _NumpadButton(
-                    digit: '3',
-                    subtext: 'DEF',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('3'),
-                  ),
-                  _NumpadButton(
-                    digit: '4',
-                    subtext: 'GHI',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('4'),
-                  ),
-                  _NumpadButton(
-                    digit: '5',
-                    subtext: 'JKL',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('5'),
-                  ),
-                  _NumpadButton(
-                    digit: '6',
-                    subtext: 'MNO',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('6'),
-                  ),
-                  _NumpadButton(
-                    digit: '7',
-                    subtext: 'PQRS',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('7'),
-                  ),
-                  _NumpadButton(
-                    digit: '8',
-                    subtext: 'TUV',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('8'),
-                  ),
-                  _NumpadButton(
-                    digit: '9',
-                    subtext: 'WXYZ',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('9'),
-                  ),
-                  _NumpadButton(
-                    digit: '*',
-                    subtext: '',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('*'),
-                  ),
-                  _NumpadButton(
-                    digit: '0',
-                    subtext: '+',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('0'),
-                    onLongPress: () => ref.read(dialedNumberProvider.notifier).add('+'),
-                  ),
-                  _NumpadButton(
-                    digit: '#',
-                    subtext: '',
-                    onPressed: () => ref.read(dialedNumberProvider.notifier).add('#'),
-                  ),
+                  _NumpadButton(digit: '1', subtext: '',     onPressed: () => ref.read(dialedNumberProvider.notifier).add('1')),
+                  _NumpadButton(digit: '2', subtext: 'ABC',  onPressed: () => ref.read(dialedNumberProvider.notifier).add('2')),
+                  _NumpadButton(digit: '3', subtext: 'DEF',  onPressed: () => ref.read(dialedNumberProvider.notifier).add('3')),
+                  _NumpadButton(digit: '4', subtext: 'GHI',  onPressed: () => ref.read(dialedNumberProvider.notifier).add('4')),
+                  _NumpadButton(digit: '5', subtext: 'JKL',  onPressed: () => ref.read(dialedNumberProvider.notifier).add('5')),
+                  _NumpadButton(digit: '6', subtext: 'MNO',  onPressed: () => ref.read(dialedNumberProvider.notifier).add('6')),
+                  _NumpadButton(digit: '7', subtext: 'PQRS', onPressed: () => ref.read(dialedNumberProvider.notifier).add('7')),
+                  _NumpadButton(digit: '8', subtext: 'TUV',  onPressed: () => ref.read(dialedNumberProvider.notifier).add('8')),
+                  _NumpadButton(digit: '9', subtext: 'WXYZ', onPressed: () => ref.read(dialedNumberProvider.notifier).add('9')),
+                  _NumpadButton(digit: '*', subtext: '',     onPressed: () => ref.read(dialedNumberProvider.notifier).add('*')),
+                  _NumpadButton(digit: '0', subtext: '+',    onPressed: () => ref.read(dialedNumberProvider.notifier).add('0'),
+                    onLongPress: () => ref.read(dialedNumberProvider.notifier).add('+')),
+                  _NumpadButton(digit: '#', subtext: '',     onPressed: () => ref.read(dialedNumberProvider.notifier).add('#')),
                 ],
               ),
             ),
           ),
-          
-          // Call button
+
+          // Call button — outgoing calls not yet supported
           Padding(
             padding: const EdgeInsets.all(24),
             child: FloatingActionButton.large(
+              heroTag: 'dialer-call',
               onPressed: number.isNotEmpty
                 ? () {
-                    sipService.call(number);
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => CallScreen(number: number),
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Outgoing calls are not yet configured'),
+                        duration: Duration(seconds: 3),
                       ),
                     );
+                    ref.read(dialedNumberProvider.notifier).clear();
                   }
                 : null,
-              backgroundColor: Colors.green,
+              backgroundColor: number.isNotEmpty ? Colors.green : Colors.green.withOpacity(0.4),
               child: const Icon(Icons.call, size: 32),
             ),
           ),

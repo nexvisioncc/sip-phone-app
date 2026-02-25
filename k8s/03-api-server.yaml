@@ -28,79 +28,431 @@ spec:
             "version": "1.0.0",
             "dependencies": {
               "express": "^4.18.2",
+              "ws": "^8.13.0",
               "firebase-admin": "^12.0.0"
             }
           }
           EOF
           npm install
           cat > server.js << 'EOF'
-          const express = require('express');
-          const admin = require('firebase-admin');
+          'use strict';
+          const express  = require('express');
+          const http     = require('http');
+          const WebSocket = require('ws');
+          const crypto   = require('crypto');
+          const admin    = require('firebase-admin');
 
-          const app = express();
+          const app    = express();
           app.use(express.json());
+          const server = http.createServer(app);
 
-          // Initialize Firebase — gracefully skip if credentials are missing/invalid
+          // WebSocket server for Flutter clients — path /ws
+          const wss = new WebSocket.Server({ server, path: '/ws' });
+
+          // ── Firebase ─────────────────────────────────────────────────────
           let firebaseReady = false;
           try {
             const sa = require(process.env.GOOGLE_APPLICATION_CREDENTIALS);
             admin.initializeApp({ credential: admin.credential.cert(sa) });
             firebaseReady = true;
-            console.log('Firebase initialized');
+            console.log('[Firebase] initialized');
           } catch (e) {
-            console.warn('Firebase skipped:', e.message);
+            console.warn('[Firebase] skipped:', e.message);
           }
 
-          function getMessaging() {
-            if (!firebaseReady) return null;
-            try { return admin.messaging(); } catch (e) { return null; }
+          // ── Config ───────────────────────────────────────────────────────
+          const ASTERISK_WS = 'ws://asterisk:8080/ws';
+          const SIP_USER    = 'herberttung';
+          const SIP_DOMAIN  = 'sip.nexvision.cc';
+
+          // ── State ────────────────────────────────────────────────────────
+          let sipWs         = null;
+          let sipRegistered = false;
+          let flutterWs     = null;   // single active Flutter client
+
+          let regCallId     = null;
+          let regCseq       = 1;
+          let regFromTag    = null;
+          let regTimer      = null;
+
+          // Call dialog state
+          let pendingInvite = null;  // call ringing: { via,from,to,callId,cseq,contact,body }
+          let activeDialog  = null;  // call active:  { callId,localTag,remoteTag,remoteUri,fromHeader,outCseq }
+
+          // ── Helpers ──────────────────────────────────────────────────────
+          function uuid() { return crypto.randomBytes(8).toString('hex'); }
+
+          function getHeader(lines, name) {
+            const lc = name.toLowerCase();
+            for (const line of lines) {
+              const ci = line.indexOf(':');
+              if (ci > 0 && line.slice(0, ci).toLowerCase().trim() === lc)
+                return line.slice(ci + 1).trim();
+            }
+            return '';
           }
 
-          // Health check
-          app.get('/health', (req, res) => {
-            res.json({ status: 'ok', timestamp: new Date().toISOString(), firebase: firebaseReady });
+          function parseSip(raw) {
+            const di   = raw.indexOf('\r\n\r\n');
+            const hdr  = di >= 0 ? raw.slice(0, di) : raw;
+            const body = di >= 0 ? raw.slice(di + 4) : '';
+            const lines = hdr.split('\r\n');
+            return { first: lines[0], lines, body };
+          }
+
+          function buildResp(status, inv, extra = [], body = '') {
+            return [
+              `SIP/2.0 ${status}`,
+              `Via: ${inv.via}`,
+              `From: ${inv.from}`,
+              `To: ${inv.to}`,
+              `Call-ID: ${inv.callId}`,
+              `CSeq: ${inv.cseq}`,
+              ...extra,
+              `Content-Length: ${Buffer.byteLength(body)}`,
+              '', body,
+            ].join('\r\n');
+          }
+
+          function sendSip(msg) {
+            if (sipWs && sipWs.readyState === WebSocket.OPEN) sipWs.send(msg);
+          }
+
+          function sendFlutter(obj) {
+            if (flutterWs && flutterWs.readyState === WebSocket.OPEN)
+              flutterWs.send(JSON.stringify(obj));
+          }
+
+          // ── SIP Registration ─────────────────────────────────────────────
+          function register() {
+            if (!regCallId) { regCallId = uuid(); regFromTag = uuid(); }
+            const branch = 'z9hG4bK' + uuid();
+            sendSip([
+              `REGISTER sip:${SIP_DOMAIN} SIP/2.0`,
+              `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${branch};rport`,
+              `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${regFromTag}`,
+              `To: <sip:${SIP_USER}@${SIP_DOMAIN}>`,
+              `Call-ID: ${regCallId}`,
+              `CSeq: ${regCseq++} REGISTER`,
+              `Contact: <sip:${SIP_USER}@${SIP_DOMAIN};transport=ws>`,
+              `Expires: 3600`,
+              `Content-Length: 0`,
+              '', '',
+            ].join('\r\n'));
+          }
+
+          // ── SIP Message Router ───────────────────────────────────────────
+          function handleSipMsg(raw) {
+            const { first, lines, body } = parseSip(raw);
+
+            if (first.startsWith('SIP/2.0')) {
+              const code    = parseInt(first.split(' ')[1]);
+              const cseqHdr = getHeader(lines, 'CSeq');
+              const method  = cseqHdr.split(' ').pop();
+
+              if (method === 'REGISTER' && code === 200) {
+                console.log('[SIP] Registered with Asterisk');
+                sipRegistered = true;
+                sendFlutter({ type: 'registered' });
+                if (regTimer) clearTimeout(regTimer);
+                regTimer = setTimeout(register, 3500 * 1000);
+              }
+              return;
+            }
+
+            const method = first.split(' ')[0];
+            switch (method) {
+              case 'INVITE':  handleInvite(lines, body); break;
+              case 'ACK':     handleAck(lines);          break;
+              case 'BYE':     handleBye(lines);          break;
+              case 'CANCEL':  handleCancel(lines);       break;
+              case 'OPTIONS':
+                sendSip([
+                  'SIP/2.0 200 OK',
+                  `Via: ${getHeader(lines, 'Via')}`,
+                  `From: ${getHeader(lines, 'From')}`,
+                  `To: ${getHeader(lines, 'To')}`,
+                  `Call-ID: ${getHeader(lines, 'Call-ID')}`,
+                  `CSeq: ${getHeader(lines, 'CSeq')}`,
+                  'Content-Length: 0', '', '',
+                ].join('\r\n'));
+                break;
+            }
+          }
+
+          // ── INVITE ───────────────────────────────────────────────────────
+          function handleInvite(lines, body) {
+            const callId = getHeader(lines, 'Call-ID');
+
+            // Retransmission: re-send 180 Ringing
+            if (pendingInvite && pendingInvite.callId === callId) {
+              sendSip(buildResp('180 Ringing', pendingInvite,
+                [`Contact: <sip:${SIP_USER}@${SIP_DOMAIN};transport=ws>`]));
+              return;
+            }
+
+            const via    = getHeader(lines, 'Via');
+            const from   = getHeader(lines, 'From');
+            const toRaw  = getHeader(lines, 'To');
+            const cseq   = getHeader(lines, 'CSeq');
+            const contact = getHeader(lines, 'Contact');
+            const to     = `${toRaw};tag=${uuid()}`;
+
+            pendingInvite = { via, from, to, callId, cseq, contact, body };
+
+            sendSip(buildResp('100 Trying', pendingInvite));
+            sendSip(buildResp('180 Ringing', pendingInvite,
+              [`Contact: <sip:${SIP_USER}@${SIP_DOMAIN};transport=ws>`]));
+
+            const callerMatch = from.match(/sip:([^@>]+)/);
+            const caller = callerMatch ? callerMatch[1] : 'Unknown';
+            console.log('[SIP] Incoming call from', caller, '— call-id:', callId);
+
+            sendFlutter({ type: 'incoming_call', call_id: callId, from: caller, sdp_offer: body });
+
+            // Auto-reject after 30 s if Flutter doesn't answer
+            setTimeout(() => {
+              if (pendingInvite && pendingInvite.callId === callId) {
+                console.log('[SIP] Timeout: rejecting unanswered call', callId);
+                sendSip(buildResp('486 Busy Here', pendingInvite));
+                sendFlutter({ type: 'call_state', call_id: callId, state: 'ended' });
+                pendingInvite = null;
+              }
+            }, 30000);
+          }
+
+          // ── ACK (call connected) ─────────────────────────────────────────
+          function handleAck(lines) {
+            const callId = getHeader(lines, 'Call-ID');
+            console.log('[SIP] ACK — call active', callId);
+            if (activeDialog && activeDialog.callId === callId) {
+              sendFlutter({ type: 'call_state', call_id: callId, state: 'active' });
+            }
+          }
+
+          // ── BYE ──────────────────────────────────────────────────────────
+          function handleBye(lines) {
+            const callId = getHeader(lines, 'Call-ID');
+            const inv = {
+              via:    getHeader(lines, 'Via'),
+              from:   getHeader(lines, 'From'),
+              to:     getHeader(lines, 'To'),
+              callId,
+              cseq:   getHeader(lines, 'CSeq'),
+            };
+            sendSip(buildResp('200 OK', inv));
+            activeDialog  = null;
+            pendingInvite = null;
+            sendFlutter({ type: 'call_state', call_id: callId, state: 'ended' });
+            console.log('[SIP] BYE — call ended', callId);
+          }
+
+          // ── CANCEL ───────────────────────────────────────────────────────
+          function handleCancel(lines) {
+            const callId = getHeader(lines, 'Call-ID');
+            const inv = {
+              via:    getHeader(lines, 'Via'),
+              from:   getHeader(lines, 'From'),
+              to:     getHeader(lines, 'To'),
+              callId,
+              cseq:   getHeader(lines, 'CSeq'),
+            };
+            sendSip(buildResp('200 OK', inv));
+            if (pendingInvite && pendingInvite.callId === callId) {
+              sendSip(buildResp('487 Request Terminated', pendingInvite));
+              pendingInvite = null;
+            }
+            sendFlutter({ type: 'call_state', call_id: callId, state: 'ended' });
+            console.log('[SIP] CANCEL — call ended', callId);
+          }
+
+          // ── Answer / Reject / Hangup / DTMF ─────────────────────────────
+          function answerCall(callId, sdpAnswer) {
+            if (!pendingInvite || pendingInvite.callId !== callId) {
+              console.warn('[SIP] answerCall: no pending invite for', callId);
+              return;
+            }
+            const inv = pendingInvite;
+            sendSip(buildResp('200 OK', inv, [
+              `Contact: <sip:${SIP_USER}@${SIP_DOMAIN};transport=ws>`,
+              'Content-Type: application/sdp',
+            ], sdpAnswer));
+
+            // Store dialog state for outgoing BYE / INFO
+            const remoteTagM  = inv.from.match(/;tag=([^\s;>]+)/);
+            const contactUriM = inv.contact.match(/<([^>]+)>/);
+            activeDialog = {
+              callId,
+              localTag:   inv.to.match(/;tag=([^\s;>]+)/)?.[1] || '',
+              remoteTag:  remoteTagM  ? remoteTagM[1]  : '',
+              remoteUri:  contactUriM ? contactUriM[1] : (inv.from.match(/<([^>]+)>/)?.[1] || ''),
+              fromHeader: inv.from,
+              outCseq:    2,
+            };
+            pendingInvite = null;
+            console.log('[SIP] 200 OK sent for call', callId);
+          }
+
+          function rejectCall(callId) {
+            if (!pendingInvite || pendingInvite.callId !== callId) return;
+            sendSip(buildResp('486 Busy Here', pendingInvite));
+            sendFlutter({ type: 'call_state', call_id: callId, state: 'ended' });
+            pendingInvite = null;
+            console.log('[SIP] Rejected call', callId);
+          }
+
+          function hangupCall(callId) {
+            if (!activeDialog || activeDialog.callId !== callId) return;
+            const d = activeDialog;
+            const branch = 'z9hG4bK' + uuid();
+            sendSip([
+              `BYE ${d.remoteUri} SIP/2.0`,
+              `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${branch};rport`,
+              `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${d.localTag}`,
+              `To: ${d.fromHeader}`,
+              `Call-ID: ${d.callId}`,
+              `CSeq: ${d.outCseq++} BYE`,
+              'Content-Length: 0',
+              '', '',
+            ].join('\r\n'));
+            activeDialog = null;
+            console.log('[SIP] BYE sent for call', callId);
+          }
+
+          function sendDtmf(callId, tone) {
+            if (!activeDialog || activeDialog.callId !== callId) return;
+            const d    = activeDialog;
+            const branch = 'z9hG4bK' + uuid();
+            const body = `Signal=${tone}\r\nDuration=160\r\n`;
+            sendSip([
+              `INFO ${d.remoteUri} SIP/2.0`,
+              `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${branch};rport`,
+              `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${d.localTag}`,
+              `To: ${d.fromHeader}`,
+              `Call-ID: ${d.callId}`,
+              `CSeq: ${d.outCseq++} INFO`,
+              'Content-Type: application/dtmf-relay',
+              `Content-Length: ${Buffer.byteLength(body)}`,
+              '', body,
+            ].join('\r\n'));
+          }
+
+          // ── SIP WebSocket (Asterisk) ──────────────────────────────────────
+          // Keepalive: ping Asterisk every 20s to prevent HTTP session timeout
+          setInterval(() => {
+            if (sipWs && sipWs.readyState === WebSocket.OPEN) sipWs.ping();
+          }, 20000);
+
+          function connectSip() {
+            sipWs = new WebSocket(ASTERISK_WS, ['sip']);
+
+            sipWs.on('open', () => {
+              console.log('[SIP] Connected to Asterisk');
+              regCallId = null; regCseq = 1; regFromTag = null;
+              register();
+            });
+
+            sipWs.on('message', (data) => handleSipMsg(data.toString()));
+
+            sipWs.on('close', () => {
+              sipRegistered = false;
+              console.log('[SIP] Disconnected — reconnecting in 5s');
+              if (regTimer) { clearTimeout(regTimer); regTimer = null; }
+              sendFlutter({ type: 'error', message: 'server_disconnected' });
+              setTimeout(connectSip, 5000);
+            });
+
+            sipWs.on('error', (e) => console.error('[SIP] error:', e.message));
+          }
+
+          // ── Flutter WebSocket Server ──────────────────────────────────────
+          // Keepalive: ping Flutter clients every 25s to prevent proxy timeouts
+          setInterval(() => {
+            wss.clients.forEach(ws => {
+              if (ws.isAlive === false) { ws.terminate(); return; }
+              ws.isAlive = false;
+              ws.ping();
+            });
+          }, 25000);
+
+          wss.on('connection', (ws) => {
+            console.log('[Flutter] Client connected');
+            flutterWs = ws;
+            ws.isAlive = true;
+            ws.on('pong', () => { ws.isAlive = true; });
+
+            // Immediately tell the client our current state
+            if (sipRegistered) ws.send(JSON.stringify({ type: 'registered' }));
+
+            // Notify about any ringing call the client missed
+            if (pendingInvite) {
+              const callerMatch = pendingInvite.from.match(/sip:([^@>]+)/);
+              const caller = callerMatch ? callerMatch[1] : 'Unknown';
+              ws.send(JSON.stringify({
+                type: 'incoming_call',
+                call_id: pendingInvite.callId,
+                from: caller,
+                sdp_offer: pendingInvite.body,
+              }));
+            }
+
+            ws.on('message', (data) => {
+              let msg;
+              try { msg = JSON.parse(data); } catch { return; }
+              switch (msg.type) {
+                case 'answer':  answerCall(msg.call_id, msg.sdp_answer); break;
+                case 'reject':  rejectCall(msg.call_id);                 break;
+                case 'hangup':  hangupCall(msg.call_id);                 break;
+                case 'dtmf':    sendDtmf(msg.call_id, msg.tone);         break;
+              }
+            });
+
+            ws.on('close', () => {
+              console.log('[Flutter] Client disconnected');
+              if (flutterWs === ws) flutterWs = null;
+            });
           });
 
-          // Register device
-          app.post('/devices', async (req, res) => {
+          // ── REST Endpoints ────────────────────────────────────────────────
+          app.get('/health', (_, res) => res.json({
+            status: 'ok',
+            sip_connected:    sipWs?.readyState === WebSocket.OPEN,
+            sip_registered:   sipRegistered,
+            flutter_connected: flutterWs?.readyState === WebSocket.OPEN,
+            firebase:         firebaseReady,
+          }));
+
+          app.post('/devices', (req, res) => {
             const { fcm_token, platform } = req.body;
-            console.log('Device registered:', { fcm_token: fcm_token?.slice(0, 20) + '...', platform });
+            console.log('Device registered:', { token: fcm_token?.slice(0, 20) + '...', platform });
             res.json({ success: true });
           });
 
-          // Send push notification
           app.post('/push/send', async (req, res) => {
             try {
-              const messaging = getMessaging();
-              if (!messaging) {
-                return res.status(503).json({ error: 'Firebase not initialized' });
-              }
+              if (!firebaseReady) return res.status(503).json({ error: 'Firebase not initialized' });
               const { token, title, body, data } = req.body;
-              const message = {
+              const resp = await admin.messaging().send({
                 token,
                 notification: { title, body },
                 data: data || {},
-                android: {
-                  priority: 'high',
-                  notification: { channelId: 'sip_calls_channel', priority: 'high' }
-                }
-              };
-              const response = await messaging.send(message);
-              res.json({ success: true, messageId: response });
-            } catch (error) {
-              console.error('Push error:', error);
-              res.status(500).json({ error: error.message });
+                android: { priority: 'high', notification: { channelId: 'sip_calls_channel' } },
+              });
+              res.json({ success: true, messageId: resp });
+            } catch (e) {
+              res.status(500).json({ error: e.message });
             }
           });
 
-          // Get SIP credentials
           app.get('/users/:userId/sip-credentials', (req, res) => {
-            res.json({ username: 'test-user', password: 'test-pass', domain: 'sip.nexvision.cc' });
+            res.json({ username: SIP_USER, domain: SIP_DOMAIN });
           });
 
+          // ── Start ─────────────────────────────────────────────────────────
           const PORT = process.env.PORT || 3000;
-          app.listen(PORT, '0.0.0.0', () => {
-            console.log('SIP API server running on port ' + PORT);
+          server.listen(PORT, '0.0.0.0', () => {
+            console.log(`[Server] Listening on port ${PORT}`);
+            connectSip();
           });
           EOF
           node server.js

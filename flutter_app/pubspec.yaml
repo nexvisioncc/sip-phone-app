@@ -11,8 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   
-  # SIP & WebRTC
-  sip_ua: ^0.6.0
+  # WebRTC (SIP handled by backend)
   flutter_webrtc: ^0.10.4
   
   # Push Notifications

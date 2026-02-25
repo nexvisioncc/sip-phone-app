@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../services/sip_service.dart';
 import 'dialer_screen.dart';
 import 'recents_screen.dart';
 import 'contacts_screen.dart';
 import 'settings_screen.dart';
+import 'call_screen.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
@@ -14,8 +16,33 @@ class MainScreen extends ConsumerStatefulWidget {
 
 class _MainScreenState extends ConsumerState<MainScreen> {
   int _selectedIndex = 0;
+  bool _callScreenActive = false;
 
   static const _titles = ['Nexvision SIP', 'Recent Calls', 'Contacts', 'Settings'];
+
+  @override
+  void initState() {
+    super.initState();
+    CallService().onIncomingCall = _handleIncomingCall;
+  }
+
+  @override
+  void dispose() {
+    CallService().onIncomingCall = null;
+    super.dispose();
+  }
+
+  void _handleIncomingCall(IncomingCallInfo callInfo) {
+    // Guard: ignore retransmitted events while a call screen is already active
+    if (_callScreenActive) return;
+
+    if (mounted) {
+      _callScreenActive = true;
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => CallScreen(number: callInfo.from, isIncoming: true),
+      )).whenComplete(() => _callScreenActive = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

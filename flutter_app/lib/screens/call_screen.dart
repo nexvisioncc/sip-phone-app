@@ -1,12 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:sip_ua/sip_ua.dart';
-import 'package:uuid/uuid.dart';
 import '../services/sip_service.dart';
 import '../services/recording_service.dart';
 import '../screens/settings_screen.dart';
 import '../screens/recents_screen.dart';
+import 'package:uuid/uuid.dart';
 
 class CallScreen extends ConsumerStatefulWidget {
   final String number;
@@ -19,54 +18,68 @@ class CallScreen extends ConsumerStatefulWidget {
 }
 
 class _CallScreenState extends ConsumerState<CallScreen> {
-  final SipService _sipService = SipService();
+  final CallService _callService = CallService();
   final RecordingService _recordingService = RecordingService();
 
   bool _isMuted = false;
   bool _isSpeaker = false;
   bool _isRecording = false;
   bool _isEnding = false;
+  bool _isWaitingToAccept = false;
+  bool _showDebug = false;
   String _callStatus = 'Calling...';
   Duration _callDuration = Duration.zero;
   Timer? _callTimer;
   String? _callId;
+  final List<String> _debugLines = [];
 
   @override
   void initState() {
     super.initState();
-    _sipService.onCallStateChanged = _handleCallStateChanged;
+    _callService.onCallStateChanged = _handleCallStateChanged;
+    _debugLines.addAll(_callService.debugLog);
+    _callService.onDebugLine = (line) {
+      if (mounted) setState(() {
+        _debugLines.add(line);
+        if (_debugLines.length > 60) _debugLines.removeAt(0);
+      });
+    };
+    if (widget.isIncoming) {
+      _callStatus = 'Incoming Call';
+      _isWaitingToAccept = true;
+    }
+    // Auto-dismiss if no state event arrives within 35 s (e.g. network drop)
+    Future.delayed(const Duration(seconds: 35), () {
+      if (mounted && _isWaitingToAccept) _handleCallEnded();
+    });
   }
 
   @override
   void dispose() {
     _callTimer?.cancel();
+    _callService.onCallStateChanged = null;
+    _callService.onDebugLine = null;
     super.dispose();
   }
 
-  Future<void> _handleCallStateChanged(CallState state) async {
+  void _handleCallStateChanged(String callId, ActiveCallState state) {
     if (!mounted) return;
     setState(() {
-      switch (state.state) {
-        case CallStateEnum.CALL_INITIATION:
-          _callStatus = 'Calling...';
+      switch (state) {
+        case ActiveCallState.connecting:
+          _callStatus = 'Connecting...';
+          _isWaitingToAccept = false;
           break;
-        case CallStateEnum.PROGRESS:
-          _callStatus = 'Ringing...';
-          break;
-        case CallStateEnum.ACCEPTED:
+        case ActiveCallState.active:
           _callStatus = 'Connected';
+          _isWaitingToAccept = false;
           _startCallTimer();
           _maybeAutoRecord();
           break;
-        case CallStateEnum.ENDED:
+        case ActiveCallState.ended:
           _callStatus = 'Ended';
+          _isWaitingToAccept = false;
           _handleCallEnded();
-          break;
-        case CallStateEnum.FAILED:
-          _callStatus = 'Failed';
-          _handleCallEnded();
-          break;
-        default:
           break;
       }
     });
@@ -80,9 +93,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
 
   void _maybeAutoRecord() {
     final settings = ref.read(settingsProvider);
-    if (settings.autoRecord) {
-      _startRecording();
-    }
+    if (settings.autoRecord) _startRecording();
   }
 
   Future<void> _startRecording() async {
@@ -112,7 +123,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
 
   void _toggleMute() {
     setState(() => _isMuted = !_isMuted);
-    _sipService.toggleMute();
+    _callService.toggleMute();
   }
 
   void _toggleSpeaker() {
@@ -127,9 +138,18 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     }
   }
 
+  Future<void> _accept() async {
+    setState(() {
+      _callStatus = 'Connecting...';
+      _isWaitingToAccept = false;
+    });
+    await _callService.answer();
+  }
+
   void _hangup() {
-    _sipService.hangup();
-    _handleCallEnded(); // let the guarded handler pop the screen
+    setState(() => _isWaitingToAccept = false);
+    _callService.hangup();
+    _handleCallEnded();
   }
 
   @override
@@ -203,66 +223,123 @@ class _CallScreenState extends ConsumerState<CallScreen> {
 
             const Spacer(),
 
-            // Call controls — row 1: mute, end, speaker
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _CallControlButton(
-                    icon: _isMuted ? Icons.mic_off : Icons.mic,
-                    label: _isMuted ? 'Unmute' : 'Mute',
-                    onPressed: _toggleMute,
-                    isActive: _isMuted,
-                  ),
-                  _CallControlButton(
-                    icon: Icons.call_end,
-                    label: 'End',
-                    onPressed: _hangup,
-                    backgroundColor: Colors.red,
-                    size: 70,
-                  ),
-                  _CallControlButton(
-                    icon: _isSpeaker ? Icons.volume_up : Icons.volume_down,
-                    label: _isSpeaker ? 'Speaker' : 'Earpiece',
-                    onPressed: _toggleSpeaker,
-                    isActive: _isSpeaker,
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 24),
-
-            // Row 2: record button
-            _CallControlButton(
-              icon: _isRecording ? Icons.stop : Icons.fiber_manual_record,
-              label: _isRecording ? 'Stop Rec' : 'Record',
-              onPressed: _toggleRecording,
-              backgroundColor: _isRecording ? Colors.red.shade700 : null,
-              isActive: _isRecording,
-            ),
-
-            const SizedBox(height: 24),
-
-            // Numpad for DTMF
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 48),
-              child: Wrap(
-                spacing: 16,
-                runSpacing: 16,
-                alignment: WrapAlignment.center,
-                children: [
-                  for (final digit in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'])
-                    _DTMFButton(
-                      digit: digit,
-                      onPressed: () => _sipService.sendDTMF(digit),
+            // Call controls
+            if (_isWaitingToAccept) ...[
+              // Incoming call: Accept / Reject
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _CallControlButton(
+                      icon: Icons.call_end,
+                      label: 'Reject',
+                      onPressed: _hangup,
+                      backgroundColor: Colors.red,
+                      size: 70,
                     ),
-                ],
+                    _CallControlButton(
+                      icon: Icons.call,
+                      label: 'Accept',
+                      onPressed: _accept,
+                      backgroundColor: Colors.green,
+                      size: 70,
+                    ),
+                  ],
+                ),
+              ),
+            ] else ...[
+              // Active call: mute, end, speaker
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _CallControlButton(
+                      icon: _isMuted ? Icons.mic_off : Icons.mic,
+                      label: _isMuted ? 'Unmute' : 'Mute',
+                      onPressed: _toggleMute,
+                      isActive: _isMuted,
+                    ),
+                    _CallControlButton(
+                      icon: Icons.call_end,
+                      label: 'End',
+                      onPressed: _hangup,
+                      backgroundColor: Colors.red,
+                      size: 70,
+                    ),
+                    _CallControlButton(
+                      icon: _isSpeaker ? Icons.volume_up : Icons.volume_down,
+                      label: _isSpeaker ? 'Speaker' : 'Earpiece',
+                      onPressed: _toggleSpeaker,
+                      isActive: _isSpeaker,
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 24),
+
+              // Record button
+              _CallControlButton(
+                icon: _isRecording ? Icons.stop : Icons.fiber_manual_record,
+                label: _isRecording ? 'Stop Rec' : 'Record',
+                onPressed: _toggleRecording,
+                backgroundColor: _isRecording ? Colors.red.shade700 : null,
+                isActive: _isRecording,
+              ),
+
+              const SizedBox(height: 24),
+
+              // DTMF numpad
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 48),
+                child: Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    for (final digit in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'])
+                      _DTMFButton(
+                        digit: digit,
+                        onPressed: () => _callService.sendDTMF(digit),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 8),
+
+            // Debug toggle
+            GestureDetector(
+              onTap: () => setState(() => _showDebug = !_showDebug),
+              child: Text(
+                _showDebug ? 'Hide debug ▲' : 'Debug ▼',
+                style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
               ),
             ),
 
-            const SizedBox(height: 48),
+            if (_showDebug)
+              Container(
+                height: 180,
+                margin: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: ListView.builder(
+                  reverse: true,
+                  itemCount: _debugLines.length,
+                  itemBuilder: (_, i) => Text(
+                    _debugLines[_debugLines.length - 1 - i],
+                    style: const TextStyle(color: Colors.greenAccent, fontSize: 9, fontFamily: 'monospace'),
+                  ),
+                ),
+              ),
+
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -331,6 +408,7 @@ class _CallControlButton extends StatelessWidget {
       children: [
         FloatingActionButton(
           onPressed: onPressed,
+          heroTag: null,
           backgroundColor: backgroundColor ?? (isActive ? Colors.white : Colors.white24),
           foregroundColor: backgroundColor != null ? Colors.white : (isActive ? Colors.black : Colors.white),
           elevation: 0,

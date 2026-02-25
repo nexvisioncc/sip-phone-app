@@ -1,0 +1,316 @@
+---
+# Asterisk B2BUA: bridges Twilio plain-RTP ↔ Flutter app WebRTC
+# Replaces OpenSIPS as the SIP server.
+# hostNetwork: true is required so RTP ports are directly reachable (k8s
+# NodePort range 30000-32767 can't cover the 10000-10099 RTP range).
+#
+# After deploying, update the Twilio SIP Forward URI to:
+#   sip:herberttung@<node-ip>:5060;transport=tcp
+# Also open the following on the server firewall:
+#   TCP/UDP 5060  (SIP signaling from Twilio)
+#   UDP 10000-10099 (RTP media to/from the Flutter app)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: asterisk-config
+  namespace: sip-phone
+data:
+  asterisk.conf: |
+    [options]
+    verbose=3
+    debug=0
+    nocolor=yes
+
+  modules.conf: |
+    [modules]
+    autoload=yes
+    ; Disable legacy chan_sip to avoid conflicts with pjsip
+    noload => chan_sip.so
+    noload => chan_skinny.so
+    noload => chan_mgcp.so
+    noload => chan_motif.so
+    noload => chan_ooh323.so
+
+  rtp.conf: |
+    [general]
+    rtpstart=10000
+    rtpend=10099
+    ; ICE/STUN for WebRTC media path to Flutter app
+    icesupport=yes
+    stunaddr=stun.l.google.com:19302
+
+  pjsip.conf: |
+    ;=============================================================
+    ; Global settings
+    ;=============================================================
+    [global]
+    type=global
+    ; username: Flutter app REGISTER, ip: Twilio by IP, anonymous: catch-all reject
+    endpoint_identifier_order=username,ip,anonymous
+
+    ;=============================================================
+    ; Transport: UDP + TCP for Twilio SIP signaling (port 5060)
+    ;=============================================================
+    [transport-udp]
+    type=transport
+    protocol=udp
+    bind=0.0.0.0:5060
+    ; Tell Asterisk its public IP so SDP/Via headers are correct
+    external_media_address=172.93.53.224
+    external_signaling_address=172.93.53.224
+
+    [transport-tcp]
+    type=transport
+    protocol=tcp
+    bind=0.0.0.0:5060
+    external_media_address=172.93.53.224
+    external_signaling_address=172.93.53.224
+
+    ;=============================================================
+    ; Transport: WebSocket for Flutter app (nginx → port 8080)
+    ;=============================================================
+    [transport-ws]
+    type=transport
+    protocol=ws
+    bind=0.0.0.0:8080
+
+    ;=============================================================
+    ; Flutter App endpoint (WebSocket + WebRTC)
+    ; IMPORTANT: endpoint name must match the SIP username set
+    ; in the app's Settings screen (currently "herberttung").
+    ; No auth required — secured by nginx HTTPS on wss://sip-ws.nexvision.cc
+    ;=============================================================
+    [herberttung]
+    type=endpoint
+    transport=transport-ws
+    context=from-internal
+    disallow=all
+    ; Opus transcoding (codec_opus.so) not available in this image — use G.711 only.
+    ; G.711 (PCMU/PCMA) is mandatory in WebRTC spec so flutter_webrtc will accept it.
+    ; Both legs use the same codec so no transcoding is needed.
+    allow=ulaw
+    allow=alaw
+    ; WebRTC mode: enables DTLS-SRTP + ICE so Flutter/WebRTC is happy
+    webrtc=yes
+    dtls_auto_generate_cert=yes
+    dtls_verify=fingerprint
+    dtls_setup=actpass
+    ice_support=yes
+    media_use_received_transport=yes
+    rtcp_mux=yes
+    ; Always proxy media through Asterisk — never try direct media with the Twilio leg
+    direct_media=no
+    ; AOR name must match the SIP username (To: header user) for registrar lookup
+    aors=herberttung
+
+    [herberttung]
+    type=aor
+    max_contacts=1
+    remove_existing=yes
+    qualify_frequency=0
+
+    ;=============================================================
+    ; Twilio endpoint — matched by source IP via twilio-identify below.
+    ; Only calls from Twilio's IP ranges reach from-twilio context.
+    ;=============================================================
+    [twilio]
+    type=endpoint
+    context=from-twilio
+    disallow=all
+    allow=ulaw
+    allow=alaw
+    direct_media=no
+    force_rport=yes
+    rtp_symmetric=yes
+    ice_support=no
+
+    ;=============================================================
+    ; IP-based identify: maps Twilio's known SIP origination IPs
+    ; to the [twilio] endpoint. All other IPs hit [anonymous].
+    ; Source: https://help.twilio.com/articles/223179908
+    ;=============================================================
+    [twilio-identify]
+    type=identify
+    endpoint=twilio
+    ; Internal K3s pod network — calls forwarded by ai-voice-receptionist (openclaw ns)
+    match=10.42.0.0/16
+    ; US East
+    match=54.172.60.0/30
+    match=54.244.51.0/30
+    match=3.232.198.29/32
+    match=3.234.245.159/32
+    match=52.4.60.96/32
+    match=54.208.218.10/32
+    ; EU
+    match=54.171.127.192/30
+    match=52.215.127.0/30
+    match=18.202.73.108/32
+    match=3.251.71.149/32
+    ; Asia Pacific
+    match=54.169.127.128/30
+    match=54.65.63.192/30
+    match=3.1.77.166/32
+    match=3.112.80.244/32
+    match=54.252.254.64/30
+    ; South America
+    match=177.71.206.192/30
+
+    ;=============================================================
+    ; Anonymous endpoint — catch-all for unrecognised IPs (SIP
+    ; scanners, bots, etc.). Routes to reject context → silent hangup.
+    ;=============================================================
+    [anonymous]
+    type=endpoint
+    context=reject-unknown
+    disallow=all
+    allow=ulaw
+
+  extensions.conf: |
+    [general]
+    static=yes
+    writeprotect=no
+
+    ;=============================================================
+    ; Reject context — silently hangs up SIP scanners / bots
+    ;=============================================================
+    [reject-unknown]
+    exten => _.,1,Hangup(21)
+    exten => _X.,1,Hangup(21)
+
+    ;=============================================================
+    ; Incoming calls from Twilio → ring the Flutter app
+    ;=============================================================
+    [from-twilio]
+    ; _X. matches digit sequences from Twilio (avoids matching special 'h' extension)
+    exten => _X.,1,NoOp(Incoming call from ${CALLERID(num)} to ${EXTEN})
+     same => n,Dial(PJSIP/herberttung,30)
+     same => n,Hangup()
+    ; Catch-all for non-digit extensions (e.g. Twilio sends alpha userpart)
+    exten => _.,1,NoOp(Incoming call from ${CALLERID(num)} to ${EXTEN})
+     same => n,Dial(PJSIP/herberttung,30)
+     same => n,Hangup()
+
+    ;=============================================================
+    ; Outgoing calls from Flutter app
+    ; TODO: configure Twilio outbound trunk for PSTN calls
+    ;=============================================================
+    [from-internal]
+    exten => _X.,1,NoOp(Outgoing call to ${EXTEN} — no PSTN trunk configured)
+     same => n,Hangup(21)
+    exten => _+X.,1,NoOp(Outgoing call to ${EXTEN} — no PSTN trunk configured)
+     same => n,Hangup(21)
+
+  http.conf: |
+    [general]
+    ; The pjsip WebSocket transport (res_pjsip_transport_websocket.so) registers
+    ; as a handler on Asterisk's HTTP server — it does NOT create its own socket.
+    ; We must enable the HTTP server so it binds port 8080 for WS connections.
+    enabled=yes
+    bindaddr=0.0.0.0
+    bindport=8080
+    ; Keep sessions alive for 10 minutes (default 30s causes WS disconnects)
+    session_keep_alive=600
+
+  logger.conf: |
+    [general]
+    dateformat=%F %T
+    [logfiles]
+    ; Write verbose + debug to a file we can tail
+    /var/log/asterisk/messages => notice,warning,error,verbose,debug
+    console => notice,warning,error
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asterisk
+  namespace: sip-phone
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: asterisk
+  template:
+    metadata:
+      labels:
+        app: asterisk
+    spec:
+      # Required: share host network so RTP ports 10000-10099 are
+      # directly accessible from outside the cluster
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: asterisk
+        image: mlan/asterisk:full
+        # Use the image's default entrypoint; it starts Asterisk in foreground
+        ports:
+        - containerPort: 5060
+          protocol: UDP
+          name: sip-udp
+        - containerPort: 5060
+          protocol: TCP
+          name: sip-tcp
+        - containerPort: 8080
+          protocol: TCP
+          name: sip-ws
+        volumeMounts:
+        - name: config
+          mountPath: /etc/asterisk/asterisk.conf
+          subPath: asterisk.conf
+        - name: config
+          mountPath: /etc/asterisk/modules.conf
+          subPath: modules.conf
+        - name: config
+          mountPath: /etc/asterisk/rtp.conf
+          subPath: rtp.conf
+        - name: config
+          mountPath: /etc/asterisk/pjsip.conf
+          subPath: pjsip.conf
+        - name: config
+          mountPath: /etc/asterisk/extensions.conf
+          subPath: extensions.conf
+        - name: config
+          mountPath: /etc/asterisk/http.conf
+          subPath: http.conf
+        - name: config
+          mountPath: /etc/asterisk/logger.conf
+          subPath: logger.conf
+        # Writable scratch space for DTLS auto-generated certs and Asterisk spool
+        - name: asterisk-data
+          mountPath: /var/lib/asterisk
+        - name: asterisk-run
+          mountPath: /var/run/asterisk
+        - name: asterisk-log
+          mountPath: /var/log/asterisk
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+      volumes:
+      - name: config
+        configMap:
+          name: asterisk-config
+      - name: asterisk-data
+        emptyDir: {}
+      - name: asterisk-run
+        emptyDir: {}
+      - name: asterisk-log
+        emptyDir: {}
+---
+# Service: allows the nginx ingress to reach Asterisk's WebSocket port
+apiVersion: v1
+kind: Service
+metadata:
+  name: asterisk
+  namespace: sip-phone
+spec:
+  selector:
+    app: asterisk
+  ports:
+  - name: sip-ws
+    port: 8080
+    targetPort: 8080

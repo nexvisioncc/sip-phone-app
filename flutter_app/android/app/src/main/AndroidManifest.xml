@@ -8,7 +8,6 @@
     <!-- Audio Permissions -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" />
     
     <!-- Phone/Call Permissions -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
@@ -70,6 +69,14 @@
             </intent-filter>
         </service>
         
+        <!-- Background Service (flutter_background_service) - foregroundServiceType required for Android 14+ -->
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="dataSync"
+            tools:replace="android:exported" />
+
         <!-- Call Kit Service -->
         <service
             android:name="com.hiennv.flutter_callkit_incoming.CallkitIncomingService"

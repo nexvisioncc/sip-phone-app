@@ -7,6 +7,8 @@ metadata:
     cert-manager.io/cluster-issuer: letsencrypt-production
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/websocket-services: "sip-api"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: nginx
   tls:
@@ -36,7 +38,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
-    nginx.ingress.kubernetes.io/websocket-services: "opensips"
+    nginx.ingress.kubernetes.io/websocket-services: "asterisk"
 spec:
   ingressClassName: nginx
   tls:
@@ -51,6 +53,6 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: opensips
+            name: asterisk
             port:
               number: 8080

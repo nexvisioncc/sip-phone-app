@@ -8,11 +8,12 @@ data:
   opensips.cfg: |
     ####### Global Parameters #########
 
-    log_level=2
+    log_level=4
     stderror_enabled=yes
     udp_workers=2
 
     socket=udp:0.0.0.0:5060
+    socket=tcp:0.0.0.0:5060
     socket=ws:0.0.0.0:8080
 
     alias="sip.nexvision.cc"
@@ -22,6 +23,7 @@ data:
     mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
 
     loadmodule "proto_udp.so"
+    loadmodule "proto_tcp.so"
     loadmodule "proto_ws.so"
     modparam("proto_ws", "require_origin", 0)
     loadmodule "signaling.so"
@@ -37,13 +39,16 @@ data:
     modparam("usrloc", "working_mode_preset", "single-instance-no-db")
     loadmodule "registrar.so"
     modparam("registrar", "default_expires", 600)
+    modparam("registrar", "received_avp", "$avp(rcv)")
     loadmodule "nathelper.so"
     modparam("nathelper", "natping_interval", 30)
+    loadmodule "cachedb_local.so"
+    modparam("cachedb_local", "cachedb_url", "local://")
 
     ####### Routing Logic ########
 
     route {
-        xlog("L_INFO", "[$ci] $rm $ru from $fU\n");
+        xlog("L_ERR", "[$ci] $rm $ru from $fU\n");
 
         if (!mf_process_maxfwd_header(10)) {
             send_reply(483, "Too Many Hops");
@@ -60,6 +65,16 @@ data:
                 send_reply(404, "Not here");
                 exit;
             }
+            # Override $du for requests going TO the app (ACK, BYE from Twilio).
+            # $tU is the callee username; we cached their WS address on REGISTER.
+            # For requests FROM the app (BYE to Twilio), $tU is Twilio's number
+            # and no WS entry exists, so $du is left unchanged.
+            cache_fetch("local", "ws_$tU", $var(ws_addr));
+            xlog("L_ERR", "[$ci] In-dialog $rm: cached WS for $tU=[$var(ws_addr)]\n");
+            if ($var(ws_addr) != null && $(var(ws_addr){s.len}) > 0) {
+                $du = "sip:" + $var(ws_addr) + ";transport=ws";
+                xlog("L_ERR", "[$ci] In-dialog: routing via cached WS: $du\n");
+            }
             route(relay);
             exit;
         }
@@ -74,20 +89,33 @@ data:
         # SIP registration from Flutter app (WebSocket)
         # No auth challenge - single-user private server
         if (is_method("REGISTER")) {
-            fix_nated_register();
+            xlog("L_ERR", "[$ci] REGISTER src=$si:$sp socket=$socket_in\n");
+            # Store WS source address in AVP so registrar saves it as 'received'
+            $avp(rcv) = "sip:" + $si + ":" + $sp + ";transport=ws";
+            # Cache the MOST RECENT WS source address (overwrites stale entries)
+            # This ensures INVITE routing always uses the newest WS connection
+            cache_store("local", "ws_$fU", "$si:$sp", 86400);
+            xlog("L_ERR", "[$ci] Stored WS addr $si port $sp for $fU\n");
             if (!save("location")) {
                 xlog("L_ERR", "[$ci] Failed to save location for $tu\n");
             }
-            xlog("L_INFO", "[$ci] Registered $fU\n");
             exit;
         }
 
-        # Incoming INVITE (from Twilio via UDP)
+        # Incoming INVITE (from Twilio via TCP or UDP)
         if (is_method("INVITE")) {
             record_route();
             if (!lookup("location", "method-filtering")) {
                 send_reply(404, "User Not Found");
                 exit;
+            }
+            xlog("L_ERR", "[$ci] After lookup: ru=[$ru] du=[$du]\n");
+            # Use cached (most recent) WS address, not stale usrloc received param
+            cache_fetch("local", "ws_$tU", $var(ws_addr));
+            xlog("L_ERR", "[$ci] Cached WS addr for $tU: [$var(ws_addr)]\n");
+            if ($var(ws_addr) != null && $(var(ws_addr){s.len}) > 0) {
+                $du = "sip:" + $var(ws_addr) + ";transport=ws";
+                xlog("L_ERR", "[$ci] Routing via cached WS: $du\n");
             }
             route(relay);
             exit;
