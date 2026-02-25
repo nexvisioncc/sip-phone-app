@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/sip_service.dart';
 import '../services/recording_service.dart';
@@ -45,8 +46,14 @@ class _CallScreenState extends ConsumerState<CallScreen> {
       });
     };
     if (widget.isIncoming) {
-      _callStatus = 'Incoming Call';
-      _isWaitingToAccept = true;
+      if (_callService.isAnswering) {
+        // Already answering via CallKit accept — skip the waiting state
+        _callStatus = 'Connecting...';
+        _isWaitingToAccept = false;
+      } else {
+        _callStatus = 'Incoming Call';
+        _isWaitingToAccept = true;
+      }
     }
     // Auto-dismiss if no state event arrives within 35 s (e.g. network drop)
     Future.delayed(const Duration(seconds: 35), () {
@@ -139,6 +146,8 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   }
 
   Future<void> _accept() async {
+    // Do NOT call endAllCalls() here — it asynchronously fires actionCallDecline
+    // which calls reject() while answer() is running, closing _pc mid-flight.
     setState(() {
       _callStatus = 'Connecting...';
       _isWaitingToAccept = false;
@@ -147,6 +156,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   }
 
   void _hangup() {
+    FlutterCallkitIncoming.endAllCalls();
     setState(() => _isWaitingToAccept = false);
     _callService.hangup();
     _handleCallEnded();

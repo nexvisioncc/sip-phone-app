@@ -78,8 +78,13 @@ data:
     ; Flutter App endpoint (WebSocket + WebRTC)
     ; IMPORTANT: endpoint name must match the SIP username set
     ; in the app's Settings screen (currently "herberttung").
-    ; No auth required — secured by nginx HTTPS on wss://sip-ws.nexvision.cc
     ;=============================================================
+    [herberttung-auth]
+    type=auth
+    auth_type=userpass
+    username=herberttung
+    password=87828Idiot
+
     [herberttung]
     type=endpoint
     transport=transport-ws
@@ -102,6 +107,8 @@ data:
     direct_media=no
     ; AOR name must match the SIP username (To: header user) for registrar lookup
     aors=herberttung
+    auth=herberttung-auth
+    outbound_auth=herberttung-auth
 
     [herberttung]
     type=aor

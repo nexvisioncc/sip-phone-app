@@ -1,10 +1,12 @@
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
 import 'package:flutter_callkit_incoming/entities/entities.dart';
 import 'package:logger/logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/constants.dart';
 import 'api_service.dart';
+import 'sip_service.dart';
 
 class PushService {
   final FirebaseMessaging _fcm = FirebaseMessaging.instance;
@@ -107,16 +109,33 @@ class PushService {
 
     switch (event.event) {
       case Event.actionCallAccept:
-        _logger.i('Call accepted');
-        final body = event.body as Map<String, dynamic>;
-        onIncomingCall?.call(
-          body['id'] as String,
-          body['nameCaller'] as String,
-          body['handle'] as String,
-        );
+        _logger.i('Call accepted via popup');
+        // Do NOT call endCall() here — calling endCall() on a ringing call
+        // asynchronously fires actionCallDecline, which calls reject() while
+        // answer() is still in progress, closing _pc and causing an NPE crash.
+        CallService().answer();
         break;
       case Event.actionCallDecline:
-        _logger.i('Call declined');
+        _logger.i('Call declined via popup');
+        // Only reject if the decline event's callId matches our current pending
+        // call. endAllCalls() fires actionCallDecline for any still-ringing
+        // CallKit notification, and the resulting stale event must not reject
+        // a subsequent new call that arrived after the old call ended.
+        try {
+          final body = event.body;
+          if (body is Map) {
+            final declinedId = body['id']?.toString() ?? '';
+            if (declinedId.isNotEmpty &&
+                declinedId == CallService().pendingCallId &&
+                !CallService().isAnswering) {
+              CallService().reject();
+            } else {
+              _logger.i('Ignoring stale decline for $declinedId (pending=${CallService().pendingCallId})');
+            }
+          }
+        } catch (e) {
+          _logger.e('CallKit decline body error: $e');
+        }
         break;
       case Event.actionCallEnded:
         _logger.i('Call ended');
@@ -127,9 +146,34 @@ class PushService {
   }
 }
 
-// Background handler - must be top-level
+// Background handler - must be top-level, runs in a separate isolate
 @pragma('vm:entry-point')
 Future<void> _handleBackgroundMessage(RemoteMessage message) async {
-  // Handle push when app is terminated
-  // This wakes the app and should trigger SIP registration
+  WidgetsFlutterBinding.ensureInitialized();
+  if (message.data['type'] == 'incoming_call') {
+    final params = CallKitParams(
+      id: message.data['call_id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      nameCaller: message.data['caller_name'] ?? 'Unknown',
+      appName: 'Nexvision SIP',
+      handle: message.data['caller_number'] ?? '',
+      type: 0,
+      duration: 30000,
+      textAccept: 'Accept',
+      textDecline: 'Decline',
+      missedCallNotification: const NotificationParams(
+        showNotification: true,
+        isShowCallback: true,
+        subtitle: 'Missed call',
+        callbackText: 'Call back',
+      ),
+      android: const AndroidParams(
+        isCustomNotification: true,
+        isShowLogo: false,
+        ringtonePath: 'system_ringtone_default',
+        backgroundColor: '#6366F1',
+        actionColor: '#4CAF50',
+      ),
+    );
+    await FlutterCallkitIncoming.showCallkitIncoming(params);
+  }
 }
