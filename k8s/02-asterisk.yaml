@@ -232,10 +232,18 @@ data:
     [from-twilio]
     ; _X. matches digit sequences from Twilio (avoids matching special 'h' extension)
     exten => _X.,1,NoOp(Incoming call from ${CALLERID(num)} to ${EXTEN})
+     same => n,ExecIf($["${CALLERID(num):0:5}" = "+8522"]?Hangup(21))
+     same => n,ExecIf($["${CALLERID(num):0:5}" = "+8523"]?Hangup(21))
+     same => n,ExecIf($["${CALLERID(num):0:4}" = "8522"]?Hangup(21))
+     same => n,ExecIf($["${CALLERID(num):0:4}" = "8523"]?Hangup(21))
      same => n,Dial(PJSIP/herberttung,30)
      same => n,Hangup()
     ; Catch-all for non-digit extensions (e.g. Twilio sends alpha userpart)
     exten => _.,1,NoOp(Incoming call from ${CALLERID(num)} to ${EXTEN})
+     same => n,ExecIf($["${CALLERID(num):0:5}" = "+8522"]?Hangup(21))
+     same => n,ExecIf($["${CALLERID(num):0:5}" = "+8523"]?Hangup(21))
+     same => n,ExecIf($["${CALLERID(num):0:4}" = "8522"]?Hangup(21))
+     same => n,ExecIf($["${CALLERID(num):0:4}" = "8523"]?Hangup(21))
      same => n,Dial(PJSIP/herberttung,30)
      same => n,Hangup()
 
