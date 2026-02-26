@@ -78,8 +78,11 @@ spec:
           let regTimer      = null;
 
           // Call dialog state
-          let pendingInvite = null;  // call ringing: { via,from,to,callId,cseq,contact,body }
-          let activeDialog  = null;  // call active:  { callId,localTag,remoteTag,remoteUri,fromHeader,outCseq }
+          let pendingInvite     = null;  // incoming call ringing: { via,from,to,callId,cseq,contact,body }
+          let outgoingInvite    = null;  // outgoing INVITE in-flight: { callId,fromTag,toUri,branch,sdpBody,cseq }
+          let activeDialog      = null;  // active call (incoming or outgoing): { callId,localTag,remoteTag,remoteUri,fromHeader,outCseq }
+          let activeCallSdpAnswer = null; // SDP answer from Asterisk for active outgoing call; re-sent on Flutter reconnect
+          let cancelledCallId     = null; // call_id of an outgoing CANCEL we sent; used to ACK+BYE any late 200 OK
 
           // ── Helpers ──────────────────────────────────────────────────────
           function uuid() { return crypto.randomBytes(8).toString('hex'); }
@@ -96,7 +99,7 @@ spec:
             const ha1 = md5(`${SIP_USER}:${realm}:${SIP_PASS}`);
             const ha2 = md5(`${method}:${uri}`);
             const response = md5(`${ha1}:${nonce}:${ha2}`);
-            return `Digest username="${SIP_USER}", realm="${realm}", nonce="${nonce}", uri="sip:${SIP_DOMAIN}", algorithm=MD5, response="${response}"`;
+            return `Digest username="${SIP_USER}", realm="${realm}", nonce="${nonce}", uri="${uri}", algorithm=MD5, response="${response}"`;
           }
 
           function getHeader(lines, name) {
@@ -219,6 +222,132 @@ spec:
                 if (regTimer) clearTimeout(regTimer);
                 regTimer = setTimeout(register, 3500 * 1000);
               }
+
+              // ── Late 200 OK after we already sent CANCEL ──────────────────
+              // Race: CANCEL crossed with Asterisk's 200 OK — must ACK then BYE
+              if (method === 'INVITE' && code === 200 && !outgoingInvite && cancelledCallId) {
+                const oid = getHeader(lines, 'Call-ID');
+                if (oid === cancelledCallId) {
+                  const toHdr      = getHeader(lines, 'To');
+                  const contactHdr = getHeader(lines, 'Contact');
+                  const remoteUriM = contactHdr.match(/<([^>]+)>/);
+                  const remoteUri  = remoteUriM ? remoteUriM[1] : '';
+                  const fromTagM   = getHeader(lines, 'From').match(/;tag=([^\s;>]+)/);
+                  const fromTag    = fromTagM ? fromTagM[1] : '';
+                  const ackBranch  = 'z9hG4bK' + uuid();
+                  const byeBranch  = 'z9hG4bK' + uuid();
+                  // ACK the 200 OK
+                  sendSip([
+                    `ACK ${remoteUri} SIP/2.0`,
+                    `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${ackBranch};rport`,
+                    `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${fromTag}`,
+                    `To: ${toHdr}`,
+                    `Call-ID: ${oid}`,
+                    `CSeq: 2 ACK`,
+                    'Content-Length: 0',
+                    '', '',
+                  ].join('\r\n'));
+                  // Immediately BYE to tear down the PSTN leg
+                  sendSip([
+                    `BYE ${remoteUri} SIP/2.0`,
+                    `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${byeBranch};rport`,
+                    `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${fromTag}`,
+                    `To: ${toHdr}`,
+                    `Call-ID: ${oid}`,
+                    `CSeq: 3 BYE`,
+                    'Content-Length: 0',
+                    '', '',
+                  ].join('\r\n'));
+                  cancelledCallId = null;
+                  console.log('[SIP] Late 200 OK after CANCEL — ACK+BYE sent', oid);
+                }
+              }
+
+              // ── Outgoing INVITE responses ─────────────────────────────────
+              if (method === 'INVITE' && outgoingInvite) {
+                const oid = getHeader(lines, 'Call-ID');
+                if (oid === outgoingInvite.callId) {
+                  if (code === 100) { /* ignore */ }
+                  else if (code === 401 || code === 407) {
+                    // Asterisk challenges the INVITE — send ACK then re-INVITE with auth
+                    const toHdr = getHeader(lines, 'To');
+                    const ackBranch = 'z9hG4bK' + uuid();
+                    sendSip([
+                      `ACK ${outgoingInvite.toUri} SIP/2.0`,
+                      `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${ackBranch};rport`,
+                      `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${outgoingInvite.fromTag}`,
+                      `To: ${toHdr}`,
+                      `Call-ID: ${oid}`,
+                      `CSeq: ${outgoingInvite.cseq} ACK`,
+                      'Content-Length: 0',
+                      '', '',
+                    ].join('\r\n'));
+
+                    const authHdr = code === 407
+                      ? getHeader(lines, 'Proxy-Authenticate')
+                      : getHeader(lines, 'WWW-Authenticate');
+                    const authValue = digestAuth('INVITE', outgoingInvite.toUri, authHdr);
+                    if (!authValue) {
+                      console.error('[SIP] Failed to compute INVITE digest auth');
+                      sendFlutter({ type: 'call_state', call_id: oid, state: 'failed' });
+                      outgoingInvite = null;
+                      return;
+                    }
+                    outgoingInvite.cseq += 1;
+                    console.log('[SIP] Outgoing INVITE auth challenge — re-sending with credentials');
+                    sendInvite(outgoingInvite.toUri, outgoingInvite.fromTag, oid,
+                               outgoingInvite.cseq, outgoingInvite.sdpBody, authValue);
+                  } else if (code >= 180 && code < 200) {
+                    console.log('[SIP] Outgoing call ringing', oid);
+                    if (body && body.trim()) logSdpCandidates('ANSWER-183-from-Asterisk', body);
+                    const earlyMsg = { type: 'call_state', call_id: oid, state: 'ringing' };
+                    if (body && body.trim()) earlyMsg.sdp_answer = body;
+                    sendFlutter(earlyMsg);
+                  } else if (code === 200) {
+                    const toHdr     = getHeader(lines, 'To');
+                    const contactHdr = getHeader(lines, 'Contact');
+                    const remoteUriM = contactHdr.match(/<([^>]+)>/);
+                    const remoteUri  = remoteUriM ? remoteUriM[1] : outgoingInvite.toUri;
+                    const sdpAnswer  = body;
+                    logSdpCandidates('ANSWER-200-from-Asterisk', sdpAnswer);
+
+                    // Send ACK
+                    const ackBranch = 'z9hG4bK' + uuid();
+                    sendSip([
+                      `ACK ${remoteUri} SIP/2.0`,
+                      `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${ackBranch};rport`,
+                      `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${outgoingInvite.fromTag}`,
+                      `To: ${toHdr}`,
+                      `Call-ID: ${oid}`,
+                      `CSeq: ${outgoingInvite.cseq} ACK`,
+                      'Content-Length: 0',
+                      '', '',
+                    ].join('\r\n'));
+
+                    // Store dialog for BYE / DTMF
+                    // outCseq must be > last INVITE CSeq (which may be 2 after auth challenge)
+                    activeDialog = {
+                      callId:     oid,
+                      localTag:   outgoingInvite.fromTag,
+                      remoteTag:  (toHdr.match(/;tag=([^\s;>]+)/) || [])[1] || '',
+                      remoteUri,
+                      fromHeader: toHdr,   // To: from our INVITE (with Asterisk's tag) → used as To: in BYE
+                      outCseq:    outgoingInvite.cseq + 1,
+                    };
+                    activeCallSdpAnswer = sdpAnswer; // stored for re-sync if Flutter reconnects
+                    outgoingInvite = null;
+                    console.log('[SIP] Outgoing call connected', oid);
+                    sendFlutter({ type: 'call_state', call_id: oid, state: 'active', sdp_answer: sdpAnswer });
+                  } else if (code >= 400) {
+                    console.log('[SIP] Outgoing call failed:', code, oid);
+                    // 487 = CANCEL accepted — don't re-send 'ended' (already sent in hangupCall)
+                    if (code !== 487) sendFlutter({ type: 'call_state', call_id: oid, state: 'failed' });
+                    if (cancelledCallId === oid) cancelledCallId = null; // 487 = no late 200 OK coming
+                    outgoingInvite = null;
+                  }
+                }
+              }
+
               return;
             }
 
@@ -305,8 +434,9 @@ spec:
               cseq:   getHeader(lines, 'CSeq'),
             };
             sendSip(buildResp('200 OK', inv));
-            activeDialog  = null;
-            pendingInvite = null;
+            activeDialog      = null;
+            pendingInvite     = null;
+            activeCallSdpAnswer = null;
             sendFlutter({ type: 'call_state', call_id: callId, state: 'ended' });
             console.log('[SIP] BYE — call ended', callId);
           }
@@ -366,6 +496,26 @@ spec:
           }
 
           function hangupCall(callId) {
+            // Outgoing call: still dialing/ringing — send CANCEL
+            if (outgoingInvite && outgoingInvite.callId === callId) {
+              const inv = outgoingInvite;
+              outgoingInvite = null;
+              const branch = inv.branch || ('z9hG4bK' + uuid());
+              sendSip([
+                `CANCEL ${inv.toUri} SIP/2.0`,
+                `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${branch};rport`,
+                `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${inv.fromTag}`,
+                `To: <${inv.toUri}>`,
+                `Call-ID: ${inv.callId}`,
+                `CSeq: ${inv.cseq} CANCEL`,
+                'Content-Length: 0',
+                '', '',
+              ].join('\r\n'));
+              cancelledCallId = callId;  // remember in case late 200 OK arrives
+              sendFlutter({ type: 'call_state', call_id: callId, state: 'ended' });
+              console.log('[SIP] CANCEL sent for outgoing call', callId);
+              return;
+            }
             if (activeDialog && activeDialog.callId === callId) {
               const d = activeDialog;
               const branch = 'z9hG4bK' + uuid();
@@ -379,7 +529,8 @@ spec:
                 'Content-Length: 0',
                 '', '',
               ].join('\r\n'));
-              activeDialog = null;
+              activeDialog      = null;
+              activeCallSdpAnswer = null;
               console.log('[SIP] BYE sent for call', callId);
               return;
             }
@@ -392,6 +543,56 @@ spec:
               return;
             }
             console.warn('[SIP] hangupCall: no active or pending call for', callId);
+          }
+
+          // ── Outgoing call (Flutter → PSTN via Asterisk + Twilio trunk) ──────
+          function sendInvite(toUri, fromTag, callId, cseq, sdpBody, authHeader) {
+            const branch = 'z9hG4bK' + uuid();
+            if (outgoingInvite) outgoingInvite.branch = branch; // store for CANCEL
+            const lines = [
+              `INVITE ${toUri} SIP/2.0`,
+              `Via: SIP/2.0/WS ${SIP_DOMAIN};branch=${branch};rport`,
+              `From: <sip:${SIP_USER}@${SIP_DOMAIN}>;tag=${fromTag}`,
+              `To: <${toUri}>`,
+              `Call-ID: ${callId}`,
+              `CSeq: ${cseq} INVITE`,
+              `Contact: <sip:${SIP_USER}@${SIP_DOMAIN};transport=ws>`,
+              `Max-Forwards: 70`,
+            ];
+            if (authHeader) lines.push(`Authorization: ${authHeader}`);
+            lines.push('Content-Type: application/sdp');
+            lines.push(`Content-Length: ${Buffer.byteLength(sdpBody)}`);
+            lines.push('', sdpBody);
+            sendSip(lines.join('\r\n'));
+          }
+
+          function logSdpCandidates(label, sdp) {
+            if (!sdp) return;
+            const lines = sdp.split(/\r?\n/);
+            const interesting = lines.filter(l =>
+              l.startsWith('a=candidate:') || l.startsWith('a=ice-ufrag') ||
+              l.startsWith('a=fingerprint') || l.startsWith('c=') || l.startsWith('m=') ||
+              l.startsWith('a=setup:') || l.startsWith('a=sendrecv') || l.startsWith('a=sendonly'));
+            console.log(`[SDP:${label}]`, interesting.slice(0, 30).join(' | '));
+          }
+
+          function initiateOutgoingCall(number, sdpOffer, callId) {
+            if (!sipRegistered) {
+              console.warn('[SIP] Cannot place outgoing call — not registered');
+              sendFlutter({ type: 'call_state', call_id: callId, state: 'failed' });
+              return;
+            }
+            const fromTag = uuid();
+            const toUri   = `sip:${number}@${SIP_DOMAIN}`;
+            const body    = sdpOffer || '';
+            const cseq    = 1;
+
+            outgoingInvite = { callId, fromTag, toUri, sdpBody: body, cseq };
+
+            logSdpCandidates('OFFER-from-Flutter', body);
+            sendInvite(toUri, fromTag, callId, cseq, body, null);
+            console.log('[SIP] Outgoing INVITE to', number, '— call-id:', callId);
+            sendFlutter({ type: 'call_state', call_id: callId, state: 'dialing' });
           }
 
           function sendDtmf(callId, tone) {
@@ -459,7 +660,7 @@ spec:
             // Immediately tell the client our current state
             if (sipRegistered) ws.send(JSON.stringify({ type: 'registered' }));
 
-            // Notify about any ringing call the client missed
+            // Re-sync any in-progress call the client missed due to WS drop
             if (pendingInvite) {
               const callerMatch = pendingInvite.from.match(/sip:([^@>]+)/);
               const caller = callerMatch ? callerMatch[1] : 'Unknown';
@@ -469,12 +670,19 @@ spec:
                 from: caller,
                 sdp_offer: pendingInvite.body,
               }));
+            } else if (outgoingInvite) {
+              // Outgoing call still ringing — re-send ringing so Flutter updates UI
+              ws.send(JSON.stringify({ type: 'call_state', call_id: outgoingInvite.callId, state: 'ringing' }));
+            } else if (activeDialog) {
+              // Active call — re-send active + SDP answer so Flutter can complete WebRTC ICE
+              ws.send(JSON.stringify({ type: 'call_state', call_id: activeDialog.callId, state: 'active', sdp_answer: activeCallSdpAnswer || '' }));
             }
 
             ws.on('message', (data) => {
               let msg;
               try { msg = JSON.parse(data); } catch { return; }
               switch (msg.type) {
+                case 'call':    initiateOutgoingCall(msg.number, msg.sdp_offer, msg.call_id); break;
                 case 'answer':  answerCall(msg.call_id, msg.sdp_answer); break;
                 case 'reject':  rejectCall(msg.call_id);                 break;
                 case 'hangup':  hangupCall(msg.call_id);                 break;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/sip_service.dart';
+import 'call_screen.dart';
 
 final dialedNumberProvider = StateNotifierProvider<DialedNumberNotifier, String>((ref) {
   return DialedNumberNotifier();
@@ -85,20 +86,24 @@ class DialerScreen extends ConsumerWidget {
             ),
           ),
 
-          // Call button — outgoing calls not yet supported
+          // Call button
           Padding(
             padding: const EdgeInsets.all(24),
             child: FloatingActionButton.large(
               heroTag: 'dialer-call',
               onPressed: number.isNotEmpty
                 ? () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Outgoing calls are not yet configured'),
-                        duration: Duration(seconds: 3),
+                    final dialedNumber = number;
+                    ref.read(dialedNumberProvider.notifier).clear();
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => CallScreen(
+                          number: dialedNumber,
+                          isIncoming: false,
+                          initiateCall: true,
+                        ),
                       ),
                     );
-                    ref.read(dialedNumberProvider.notifier).clear();
                   }
                 : null,
               backgroundColor: number.isNotEmpty ? Colors.green : Colors.green.withOpacity(0.4),

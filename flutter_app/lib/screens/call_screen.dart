@@ -11,8 +11,9 @@ import 'package:uuid/uuid.dart';
 class CallScreen extends ConsumerStatefulWidget {
   final String number;
   final bool isIncoming;
+  final bool initiateCall; // for outgoing: trigger call() after build
 
-  const CallScreen({super.key, required this.number, this.isIncoming = false});
+  const CallScreen({super.key, required this.number, this.isIncoming = false, this.initiateCall = false});
 
   @override
   ConsumerState<CallScreen> createState() => _CallScreenState();
@@ -55,6 +56,16 @@ class _CallScreenState extends ConsumerState<CallScreen> {
         _isWaitingToAccept = true;
       }
     }
+
+    // Outgoing call: initiate after the first frame so callbacks are registered
+    if (widget.initiateCall) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _callService.call(widget.number).catchError((e) {
+          _handleCallEnded();
+        });
+      });
+    }
+
     // Auto-dismiss if no state event arrives within 35 s (e.g. network drop)
     Future.delayed(const Duration(seconds: 35), () {
       if (mounted && _isWaitingToAccept) _handleCallEnded();
@@ -74,7 +85,11 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     setState(() {
       switch (state) {
         case ActiveCallState.connecting:
-          _callStatus = 'Connecting...';
+          _callStatus = 'Calling...';
+          _isWaitingToAccept = false;
+          break;
+        case ActiveCallState.ringing:
+          _callStatus = 'Ringing...';
           _isWaitingToAccept = false;
           break;
         case ActiveCallState.active:

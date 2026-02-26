@@ -14,7 +14,7 @@ import 'api_service.dart';
 enum WsState { disconnected, connecting, connected }
 
 /// State of the current call leg.
-enum ActiveCallState { connecting, active, ended }
+enum ActiveCallState { connecting, ringing, active, ended }
 
 /// Data about an incoming call received from the backend.
 class IncomingCallInfo {
@@ -52,6 +52,7 @@ class CallService {
   String? _answeringCallId; // set during answer() setup, cleared when active or cleaned up
   bool _isMuted = false;
   bool _isAnswering = false;
+  bool _remoteDescSet = false; // prevent double setRemoteDescription on outgoing calls
   String? _pendingAcceptCallId; // set when user accepted via CallKit before WS delivered incoming_call
 
   // ── Callbacks ────────────────────────────────────────────────────────────
@@ -177,9 +178,39 @@ class CallService {
   void _handleCallStateMsg(Map<String, dynamic> msg) {
     final state = msg['state'] as String?;
     final callId = msg['call_id'] as String? ?? _activeCallId ?? '';
-    if (state == 'active') {
+    if (state == 'dialing' || state == 'connecting') {
       _activeCallId = callId;
+      onCallStateChanged?.call(callId, ActiveCallState.connecting);
+    } else if (state == 'ringing') {
+      _activeCallId = callId;
+      // 183 Session Progress carries Asterisk's SDP (ICE + DTLS).
+      // Set remote description immediately so ICE starts while the phone rings.
+      final earlySdp = msg['sdp_answer'] as String?;
+      if (earlySdp != null && earlySdp.isNotEmpty && _pc != null && !_remoteDescSet) {
+        _remoteDescSet = true;
+        _pc!.setRemoteDescription(RTCSessionDescription(earlySdp, 'answer'))
+            .then((_) => _dbg('Remote desc set from early SDP (183)'))
+            .catchError((e) => _dbg('setRemoteDescription (183) error: $e'));
+      }
+      onCallStateChanged?.call(callId, ActiveCallState.ringing);
+    } else if (state == 'active') {
+      _activeCallId = callId;
+      // For outgoing calls: set remote description only if 183 didn't already do it.
+      // Double-calling setRemoteDescription(answer) when state is already 'stable'
+      // is invalid per WebRTC spec and silently corrupts ICE state.
+      final sdpAnswer = msg['sdp_answer'] as String?;
+      if (sdpAnswer != null && sdpAnswer.isNotEmpty && _pc != null && !_remoteDescSet) {
+        _remoteDescSet = true;
+        _pc!.setRemoteDescription(RTCSessionDescription(sdpAnswer, 'answer'))
+          .then((_) => _dbg('Remote desc set from 200 OK SDP answer'))
+          .catchError((e) => _dbg('setRemoteDescription error: $e'));
+      } else if (_remoteDescSet) {
+        _dbg('Remote desc already set from 183 — skipping 200 OK SDP');
+      }
       onCallStateChanged?.call(callId, ActiveCallState.active);
+      // Poll RTP stats every 2 s
+      _statsTimer?.cancel();
+      _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) => _pollStats());
     } else if (state == 'ended' || state == 'failed') {
       final id = _activeCallId ?? callId;
       _activeCallId = null;
@@ -257,6 +288,11 @@ class CallService {
       _pc = await createPeerConnection({
         'iceServers': [
           {'urls': 'stun:stun.l.google.com:19302'},
+          {
+            'urls': 'turn:172.93.53.224:3478',
+            'username': 'nexvision',
+            'credential': 'turn_secret_2024',
+          },
         ],
       });
 
@@ -442,6 +478,49 @@ class CallService {
     }
   }
 
+  /// Strips all non-audio m-sections from [sdp] and fixes a=group:BUNDLE.
+  ///
+  /// Asterisk's pjsip WebSocket transport has a small receive buffer; a full
+  /// WebRTC SDP with video ICE candidates (~6600 bytes) triggers
+  /// PJSIP_ERXOVERFLOW.  Removing the video section drops the SDP to ~2000
+  /// bytes.  Also removes video mids from a=group:BUNDLE so the SDP is valid.
+  String _audioOnlySdp(String sdp) {
+    final lines = sdp.split('\n');
+
+    // Collect mid values of non-audio m-sections so we can fix BUNDLE
+    final removedMids = <String>[];
+    bool inNonAudio = false;
+    for (final line in lines) {
+      final t = line.trim();
+      if (t.startsWith('m=')) inNonAudio = !t.startsWith('m=audio');
+      if (inNonAudio && t.startsWith('a=mid:')) {
+        removedMids.add(t.substring(6).trim());
+      }
+    }
+
+    // Re-build keeping only session section + audio m-section
+    final result = <String>[];
+    bool skipSection = false;
+    for (final line in lines) {
+      final t = line.trim();
+      if (t.startsWith('m=')) skipSection = !t.startsWith('m=audio');
+      if (skipSection) continue;
+
+      // Fix a=group:BUNDLE by removing the video mids
+      if (t.startsWith('a=group:BUNDLE') && removedMids.isNotEmpty) {
+        var fixed = t;
+        for (final mid in removedMids) {
+          fixed = fixed.replaceAll(' $mid', '');
+        }
+        result.add(line.startsWith('\r') ? fixed : fixed);
+        continue;
+      }
+
+      result.add(line);
+    }
+    return result.join('\n');
+  }
+
   Future<String> _waitForIce() {
     final c = Completer<String>();
 
@@ -450,14 +529,150 @@ class CallService {
       if (!c.isCompleted) c.complete(desc?.sdp ?? '');
     }
 
+    _pc!.onIceCandidate = (RTCIceCandidate? candidate) {
+      if (candidate != null && candidate.candidate != null) {
+        _dbg('ICE cand: ${candidate.candidate}');
+      }
+    };
+
     _pc!.onIceGatheringState = (state) {
+      _dbg('ICE gather: $state');
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
         resolve();
       }
     };
-    // Fallback timeout
-    Future.delayed(const Duration(seconds: 5), resolve);
+    // Fallback timeout — increased to 8s to allow TURN relay allocation
+    Future.delayed(const Duration(seconds: 8), resolve);
     return c.future;
+  }
+
+  // ── Initiate outgoing call ───────────────────────────────────────────────
+  Future<void> call(String number) async {
+    _dbg('call() start — number=$number wsState=$_wsState');
+
+    // Wait up to 10 s for the WS to become connected (handles the race where
+    // the user taps Call just before the scheduled reconnect fires).
+    if (_wsState != WsState.connected) {
+      _dbg('call() — WS not connected, waiting up to 10 s…');
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (_wsState != WsState.connected && DateTime.now().isBefore(deadline)) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      if (_wsState != WsState.connected) {
+        _dbg('call() — timed out waiting for WS; aborting');
+        // Trigger ended so CallScreen pops back to dialer
+        final callId = DateTime.now().millisecondsSinceEpoch.toString();
+        onCallStateChanged?.call(callId, ActiveCallState.ended);
+        return;
+      }
+      _dbg('call() — WS now connected, proceeding');
+    }
+
+    try {
+      // Audio session
+      final audioSession = await AudioSession.instance;
+      await audioSession.configure(const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.allowBluetooth,
+        avAudioSessionMode: AVAudioSessionMode.voiceChat,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          usage: AndroidAudioUsage.voiceCommunication,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: false,
+      ));
+      await audioSession.setActive(true);
+
+      try {
+        await Helper.setAndroidAudioConfiguration(
+          AndroidAudioConfiguration(
+            manageAudioFocus: false,
+            androidAudioMode: AndroidAudioMode.inCommunication,
+            androidAudioFocusMode: AndroidAudioFocusMode.gain,
+            androidAudioStreamType: AndroidAudioStreamType.voiceCall,
+            androidAudioAttributesUsageType:
+                AndroidAudioAttributesUsageType.voiceCommunication,
+            androidAudioAttributesContentType:
+                AndroidAudioAttributesContentType.speech,
+            forceHandleAudioRouting: true,
+          ),
+        );
+      } catch (e) {
+        _dbg('setAndroidAudioConfig error (non-fatal): $e');
+      }
+
+      // Mic permission
+      final micStatus = await Permission.microphone.request();
+      _dbg('Mic permission: $micStatus');
+      if (!micStatus.isGranted) {
+        _dbg('call() — mic denied');
+        return;
+      }
+
+      // Prime audio pipeline (warms up AudioRecord on Samsung)
+      await _primeAudioPipeline();
+
+      _pc = await createPeerConnection({
+        'iceServers': [
+          {'urls': 'stun:stun.l.google.com:19302'},
+          {
+            'urls': 'turn:172.93.53.224:3478',
+            'username': 'nexvision',
+            'credential': 'turn_secret_2024',
+          },
+        ],
+      });
+
+      _pc!.onIceConnectionState = (s) => _dbg('ICE: $s');
+      _pc!.onConnectionState    = (s) => _dbg('PC: $s');
+      _pc!.onSignalingState     = (s) => _dbg('Sig: $s');
+
+      // Get mic and add track (before createOffer so SDP includes audio m-line)
+      _localStream = await navigator.mediaDevices.getUserMedia({
+        'audio': {
+          'echoCancellation': false,
+          'autoGainControl': false,
+          'noiseSuppression': false,
+          'highpassFilter': false,
+        },
+        'video': false,
+      });
+
+      for (final track in _localStream!.getAudioTracks()) {
+        await _pc!.addTrack(track, _localStream!);
+      }
+      _dbg('call() — mic tracks added: ${_localStream!.getAudioTracks().length}');
+
+      // Create WebRTC offer — audio only so the remote answer m-line order matches.
+      // Without OfferToReceiveVideo:false, libwebrtc adds a video m-line even
+      // with no video tracks added, causing setRemoteDescription to fail when
+      // Asterisk answers with only an audio m-line.
+      final offer = await _pc!.createOffer({
+        'mandatory': {'OfferToReceiveAudio': true, 'OfferToReceiveVideo': false},
+      });
+      await _pc!.setLocalDescription(offer);
+
+      // Wait for ICE gathering (max 8 s to allow TURN relay allocation)
+      final rawSdp = await _waitForIce();
+      final sdpOffer = _audioOnlySdp(rawSdp); // safety strip in case any non-audio slips through
+      _dbg('call() — ICE gathered (${rawSdp.length} → ${sdpOffer.length} bytes)');
+
+      // Generate a call ID and send to backend
+      final callId = DateTime.now().millisecondsSinceEpoch.toString();
+      _activeCallId = callId;
+      onCallStateChanged?.call(callId, ActiveCallState.connecting);
+
+      _send({
+        'type': 'call',
+        'number': number,
+        'sdp_offer': sdpOffer,
+        'call_id': callId,
+      });
+    } catch (e) {
+      _dbg('call() ERROR: $e');
+      _cleanupPc();
+    }
   }
 
   // ── Reject / Hangup ──────────────────────────────────────────────────────
@@ -494,6 +709,7 @@ class CallService {
   // ── Cleanup ──────────────────────────────────────────────────────────────
   void _cleanupPc() {
     _isMuted = false;
+    _remoteDescSet = false;
     _answeringCallId = null; // signal answer() to abort if still running
     _statsTimer?.cancel();
     _statsTimer = null;

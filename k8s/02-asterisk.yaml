@@ -38,6 +38,10 @@ data:
     ; ICE/STUN for WebRTC media path to Flutter app
     icesupport=yes
     stunaddr=stun.l.google.com:19302
+    ; Only advertise the public IP as ICE host candidate.
+    ; Without this, Asterisk includes Docker/K3s bridge IPs (172.17/18, 10.42)
+    ; which pollute ICE negotiation and slow down connectivity checks.
+    iceaddr=172.93.53.224
 
   pjsip.conf: |
     ;=============================================================
@@ -73,6 +77,8 @@ data:
     type=transport
     protocol=ws
     bind=0.0.0.0:8080
+    external_media_address=172.93.53.224
+    external_signaling_address=172.93.53.224
 
     ;=============================================================
     ; Flutter App endpoint (WebSocket + WebRTC)
@@ -172,6 +178,42 @@ data:
     disallow=all
     allow=ulaw
 
+    ;=============================================================
+    ; Twilio outbound SIP trunk (Elastic SIP Trunking — Termination)
+    ; Set TWILIO_TRUNK_HOST to your trunk's termination URI, e.g.:
+    ;   sk-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX.pstn.twilio.com
+    ; No auth needed when server IP (172.93.53.224) is in the
+    ; trunk's IP ACL (Twilio Console → Elastic SIP Trunks → Your
+    ; Trunk → Termination → IP Access Control Lists).
+    ;
+    ; After updating this file, run:
+    ;   kubectl apply -f k8s/02-asterisk.yaml -n sip-phone
+    ;   kubectl rollout restart deploy/asterisk -n sip-phone
+    ;=============================================================
+    [twilio-out-auth]
+    type=auth
+    auth_type=userpass
+    username=herberttung
+    password=87828Idiot
+
+    [twilio-out]
+    type=endpoint
+    transport=transport-tcp
+    context=from-twilio
+    disallow=all
+    allow=ulaw
+    allow=alaw
+    direct_media=no
+    force_rport=yes
+    rtp_symmetric=yes
+    ice_support=no
+    outbound_auth=twilio-out-auth
+    aors=twilio-out
+
+    [twilio-out]
+    type=aor
+    contact=sip:nexvision.pstn.twilio.com
+
   extensions.conf: |
     [general]
     static=yes
@@ -198,14 +240,20 @@ data:
      same => n,Hangup()
 
     ;=============================================================
-    ; Outgoing calls from Flutter app
-    ; TODO: configure Twilio outbound trunk for PSTN calls
+    ; Outgoing calls from Flutter app → Twilio SIP Trunk → PSTN
+    ;
+    ; TWILIO_CALLER_ID: replace with your Twilio phone number (E.164)
+    ; e.g. +14165551234  (the number Twilio shows the PSTN recipient)
     ;=============================================================
     [from-internal]
-    exten => _X.,1,NoOp(Outgoing call to ${EXTEN} — no PSTN trunk configured)
-     same => n,Hangup(21)
-    exten => _+X.,1,NoOp(Outgoing call to ${EXTEN} — no PSTN trunk configured)
-     same => n,Hangup(21)
+    ; E.164 numbers (already have +)
+    exten => _+X.,1,NoOp(Outgoing PSTN call to ${EXTEN})
+     same => n,Set(CALLERID(num)=+14382561852)
+     same => n,Set(CALLERID(name)=Nexvision)
+     same => n,Dial(PJSIP/${EXTEN}@twilio-out,60)
+     same => n,Hangup()
+    ; Plain digits — prepend + for E.164
+    exten => _X.,1,Goto(+${EXTEN},1)
 
   http.conf: |
     [general]
