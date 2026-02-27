@@ -254,8 +254,10 @@ data:
     ;=============================================================
     ; Incoming calls from Twilio → ring the Flutter app
     ; Nighttime (11pm-9am ET): Forward to AI voice receptionist
-    ; Note: Asterisk uses UTC. ET = UTC-5 (or UTC-4 during DST)
-    ; 11pm ET = 04:00 UTC | 9am ET = 14:00 UTC
+    ; Timezone math: ET is UTC-5 (EST) or UTC-4 (EDT)
+    ; 11pm ET = 04:00 UTC (EST winter) or 03:00 UTC (EDT summer)
+    ; 9am ET = 14:00 UTC (EST winter) or 13:00 UTC (EDT summer)
+    ; Safe window for nighttime: 04:00-13:00 UTC (covers both)
     ;=============================================================
     [from-twilio]
     ; _X. matches digit sequences from Twilio (avoids matching special 'h' extension)
@@ -264,17 +266,17 @@ data:
      same => n,ExecIf($["${CALLERID(num):0:5}" = "+8523"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8522"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8523"]?Hangup(21))
-     ; Check if nighttime (11pm-9am ET = 04:00-14:00 UTC)
-     ; During EST (winter): ET = UTC-5, so 11pm ET = 04:00 UTC, 9am ET = 14:00 UTC
-     ; During EDT (summer): ET = UTC-4, so 11pm ET = 03:00 UTC, 9am ET = 13:00 UTC
-     ; Using 03:00-14:00 UTC covers both DST and non-DST periods
-     same => n,GotoIf($[${STRFTIME(${EPOCH},UTC,%H)} >= 3 && ${STRFTIME(${EPOCH},UTC,%H)} < 14]?nighttime,1)
+     ; Check if nighttime (11pm-9am ET)
+     ; 11pm ET = 04:00 UTC (EST) / 03:00 UTC (EDT) → use 04:00 to be safe
+     ; 9am ET = 14:00 UTC (EST) / 13:00 UTC (EDT) → use 13:00 to be safe
+     ; Nighttime window in UTC: 04:00-13:00
+     same => n,GotoIf($[${STRFTIME(${EPOCH},UTC,%H)} >= 4 && ${STRFTIME(${EPOCH},UTC,%H)} < 13]?nighttime,1)
      ; Daytime: Ring Flutter app
      same => n,Dial(PJSIP/herberttung,30)
      same => n,Hangup()
 
     ; Nighttime routing - forward to AI voice receptionist
-    exten => nighttime,1,NoOp(Routing to AI voice receptionist - nighttime hours (11pm-9am ET))
+    exten => nighttime,1,NoOp(Routing to AI voice receptionist - nighttime hours 11pm-9am ET / 04:00-13:00 UTC)
      same => n,Dial(PJSIP/ai-receptionist,60)
      same => n,Hangup()
 
@@ -284,8 +286,8 @@ data:
      same => n,ExecIf($["${CALLERID(num):0:5}" = "+8523"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8522"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8523"]?Hangup(21))
-     ; Check if nighttime (11pm-9am ET = 03:00-14:00 UTC)
-     same => n,GotoIf($[${STRFTIME(${EPOCH},UTC,%H)} >= 3 && ${STRFTIME(${EPOCH},UTC,%H)} < 14]?nighttime,1)
+     ; Check if nighttime (11pm-9am ET = 04:00-13:00 UTC)
+     same => n,GotoIf($[${STRFTIME(${EPOCH},UTC,%H)} >= 4 && ${STRFTIME(${EPOCH},UTC,%H)} < 13]?nighttime,1)
      ; Daytime: Ring Flutter app
      same => n,Dial(PJSIP/herberttung,30)
      same => n,Hangup()
