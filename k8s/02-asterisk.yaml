@@ -138,6 +138,34 @@ data:
     ice_support=no
 
     ;=============================================================
+    ; AI Voice Receptionist endpoint (Retell AI)
+    ; Used for forwarding nighttime calls to AI receptionist
+    ;=============================================================
+    [ai-receptionist]
+    type=endpoint
+    transport=transport-tcp
+    context=from-twilio
+    disallow=all
+    allow=ulaw
+    allow=alaw
+    direct_media=no
+    force_rport=yes
+    rtp_symmetric=yes
+    ice_support=no
+    aors=ai-receptionist
+
+    [ai-receptionist]
+    type=aor
+    ; Retell AI SIP endpoint - UPDATE THIS!
+    ; Get your SIP URI from Retell AI Dashboard:
+    ; 1. Go to https://dashboard.retellai.com/
+    ; 2. Select your agent → Phone → SIP Trunk
+    ; 3. Copy the SIP URI (format: sip:agent-xxxxx@sip.retellai.com:5060)
+    ;
+    ; Example: contact=sip:agent-abc123@sip.retellai.com:5060
+    contact=sip:REPLACE_WITH_RETELL_SIP_URI
+
+    ;=============================================================
     ; IP-based identify: maps Twilio's known SIP origination IPs
     ; to the [twilio] endpoint. All other IPs hit [anonymous].
     ; Source: https://help.twilio.com/articles/223179908
@@ -228,6 +256,7 @@ data:
 
     ;=============================================================
     ; Incoming calls from Twilio → ring the Flutter app
+    ; Nighttime (11pm-9am ET): Forward to AI voice receptionist
     ;=============================================================
     [from-twilio]
     ; _X. matches digit sequences from Twilio (avoids matching special 'h' extension)
@@ -236,14 +265,27 @@ data:
      same => n,ExecIf($["${CALLERID(num):0:5}" = "+8523"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8522"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8523"]?Hangup(21))
+     ; Check if nighttime (11pm-9am ET = 23:00-09:00 ET)
+     ; Asterisk uses local server time - assuming ET timezone
+     same => n,GotoIf($[${STRFTIME(${EPOCH},America/Toronto,%H)} >= 23 || ${STRFTIME(${EPOCH},America/Toronto,%H)} < 9]?nighttime,1)
+     ; Daytime: Ring Flutter app
      same => n,Dial(PJSIP/herberttung,30)
      same => n,Hangup()
+
+    ; Nighttime routing - forward to AI voice receptionist
+    exten => nighttime,1,NoOp(Routing to AI voice receptionist - nighttime hours)
+     same => n,Dial(PJSIP/ai-receptionist@172.93.53.224:5060,60)
+     same => n,Hangup()
+
     ; Catch-all for non-digit extensions (e.g. Twilio sends alpha userpart)
     exten => _.,1,NoOp(Incoming call from ${CALLERID(num)} to ${EXTEN})
      same => n,ExecIf($["${CALLERID(num):0:5}" = "+8522"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:5}" = "+8523"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8522"]?Hangup(21))
      same => n,ExecIf($["${CALLERID(num):0:4}" = "8523"]?Hangup(21))
+     ; Check if nighttime (11pm-9am ET)
+     same => n,GotoIf($[${STRFTIME(${EPOCH},America/Toronto,%H)} >= 23 || ${STRFTIME(${EPOCH},America/Toronto,%H)} < 9]?nighttime,1)
+     ; Daytime: Ring Flutter app
      same => n,Dial(PJSIP/herberttung,30)
      same => n,Hangup()
 
