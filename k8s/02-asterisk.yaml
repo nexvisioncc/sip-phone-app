@@ -156,14 +156,11 @@ data:
 
     [ai-receptionist]
     type=aor
-    ; Retell AI SIP endpoint - UPDATE THIS!
-    ; Get your SIP URI from Retell AI Dashboard:
-    ; 1. Go to https://dashboard.retellai.com/
-    ; 2. Select your agent → Phone → SIP Trunk
-    ; 3. Copy the SIP URI (format: sip:agent-xxxxx@sip.retellai.com:5060)
-    ;
-    ; Example: contact=sip:agent-abc123@sip.retellai.com:5060
-    contact=sip:REPLACE_WITH_RETELL_SIP_URI
+    ; Retell AI SIP endpoint for Nexvision AI Voice Receptionist
+    ; Phone: +1 (438) 256-1852
+    ; Agent: agent_8d781886289fdc010ed868a33c
+    ; Format: sip:+<phone_number>@sip.retellai.com:5060
+    contact=sip:+14382561852@sip.retellai.com:5060
 
     ;=============================================================
     ; IP-based identify: maps Twilio's known SIP origination IPs
@@ -274,7 +271,7 @@ data:
 
     ; Nighttime routing - forward to AI voice receptionist
     exten => nighttime,1,NoOp(Routing to AI voice receptionist - nighttime hours)
-     same => n,Dial(PJSIP/ai-receptionist@172.93.53.224:5060,60)
+     same => n,Dial(PJSIP/ai-receptionist,60)
      same => n,Hangup()
 
     ; Catch-all for non-digit extensions (e.g. Twilio sends alpha userpart)
