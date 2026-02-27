@@ -97,7 +97,7 @@ via Twilio, bridged through Asterisk B2BUA and a Node.js signaling backend on Ku
 
 ---
 
-## Incoming Call Flow (PSTN → Flutter)
+## Incoming Call Flow (PSTN → Flutter / AI)
 
 ```
 1. PSTN caller dials Twilio number
@@ -106,22 +106,25 @@ via Twilio, bridged through Asterisk B2BUA and a Node.js signaling backend on Ku
      <Response><Dial><Sip>sip:herberttung@172.93.53.224:5060;transport=tcp</Sip></Dial></Response>
 4. Twilio sends SIP INVITE to Asterisk (TCP port 5060)
 5. Asterisk matches [twilio-identify] → context from-twilio
-     Dial(PJSIP/herberttung, 30)
-6. Asterisk sends SIP INVITE to sip-api backend (via WebSocket)
-7. sip-api:
+6. Time-based routing decision:
+     - Blocked numbers (+8522/+8523): Hangup(21) - Rejected
+     - Nighttime (11pm-9am ET): Forward to AI voice receptionist
+     - Daytime (9am-11pm ET): Dial(PJSIP/herberttung, 30) → Ring Flutter app
+7. If daytime: Asterisk sends SIP INVITE to sip-api backend (via WebSocket)
+8. sip-api:
    a. Sends 100 Trying + 180 Ringing to Asterisk
    b. Extracts SDP offer from INVITE body
    c. Forwards {type:incoming_call, call_id, from, sdp_offer} to Flutter WS
    d. Sends FCM push if Flutter WS is not connected (phone locked/backgrounded)
-8. Flutter receives incoming_call or FCM push:
+9. Flutter receives incoming_call or FCM push:
    a. FlutterCallkitIncoming shows native call UI
    b. User taps Accept → CallService.answer()
    c. Creates WebRTC peer connection (ICE/DTLS/SRTP)
    d. Gathers ICE candidates (STUN: stun.l.google.com:19302)
    e. Sends {type:answer, call_id, sdp_answer} to backend
-9. sip-api sends 200 OK with SDP answer to Asterisk
-10. Asterisk sends ACK → sip-api sends {type:call_state, state:active}
-11. ICE connects → DTLS handshake → SRTP audio flows:
+10. sip-api sends 200 OK with SDP answer to Asterisk
+11. Asterisk sends ACK → sip-api sends {type:call_state, state:active}
+12. ICE connects → DTLS handshake → SRTP audio flows:
        Phone ←(SRTP/ICE)→ Asterisk ←(RTP)→ Twilio ←(PSTN)→ Caller
 ```
 
@@ -338,6 +341,46 @@ curl -X POST https://sip-api.nexvision.cc/test-call \
 curl https://sip-api.nexvision.cc/health
 # Returns: {"status":"ok","sip_connected":true,"sip_registered":true,"flutter_connected":true}
 ```
+
+---
+
+## Time-Based Call Routing
+
+Asterisk automatically routes calls based on time of day (Eastern Time):
+
+| Time Period | Behavior |
+|-------------|----------|
+| **Daytime (9am-11pm ET)** | Calls ring the Flutter app (normal behavior) |
+| **Nighttime (11pm-9am ET)** | Calls forward to AI voice receptionist |
+| **Blocked numbers** | +8522/+8523 prefixes are rejected 24/7 |
+
+### AI Voice Receptionist Setup
+
+To enable nighttime AI call handling:
+
+1. **Get your Retell AI SIP URI:**
+   - Go to https://dashboard.retellai.com/
+   - Select your agent → Phone → SIP Trunk
+   - Copy the SIP URI (format: `sip:agent-xxxxx@sip.retellai.com:5060`)
+
+2. **Update Asterisk config:**
+   Edit `k8s/02-asterisk.yaml` and replace `REPLACE_WITH_RETELL_SIP_URI` in the `[ai-receptionist]` aor section.
+
+3. **Apply changes:**
+   ```bash
+   kubectl apply -f k8s/02-asterisk.yaml -n sip-phone
+   kubectl rollout restart deploy/asterisk -n sip-phone
+   ```
+
+### Testing Time-Based Routing
+
+To test nighttime routing without waiting:
+1. Temporarily change the time condition in `extensions.conf`:
+   - From: `${STRFTIME(${EPOCH},America/Toronto,%H)} >= 23 || ${STRFTIME(${EPOCH},America/Toronto,%H)} < 9`
+   - To: `${STRFTIME(${EPOCH},America/Toronto,%H)} >= 0` (always true)
+
+2. Apply and test a call
+3. Revert the change when done
 
 ---
 
