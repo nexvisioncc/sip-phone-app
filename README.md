@@ -43,8 +43,8 @@ sequenceDiagram
     Asterisk<-->Twilio: Plain RTP Media
 ```
 
-1. A call arrives at **Twilio**. Based on the phone number's webhook configuration, Twilio routes it appropriately.
-2. The call can go to **Retel AI (ai-voice-receptionist)** in the K3s `openclaw` namespace, or directly to the **Asterisk B2BUA**.
+1. A call arrives at **Twilio**. Twilio supports both incoming and outgoing calls for the system.
+2. This repository (and its associated configurations) acts as the central router, deciding whether the incoming call should be routed to the **Retell AI (ai-voice-receptionist)** (in the K3s `openclaw` namespace) or directly to the **Asterisk B2BUA** for the user's phone app.
 3. **Asterisk** handles the incoming SIP INVITE. It is configured to bridge plain RTP from Twilio to WebRTC for the Flutter app.
 4. Asterisk passes the signaling via WebSocket to the **SIP API server (Node.js)**.
 5. The **SIP API** acts as a signaling proxy. It sends a push notification via **Firebase Cloud Messaging (FCM)** to wake up the Flutter app.
