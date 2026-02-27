@@ -138,15 +138,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late TextEditingController _displayNameCtrl;
   bool _credentialsDirty = false;
 
+  bool _controllersSeeded = false;
+
   @override
   void initState() {
     super.initState();
     _wsState = CallService().wsState;
     CallService().onWsStateChanged = _onWsStateChanged;
-    final s = ref.read(settingsProvider);
-    _usernameCtrl = TextEditingController(text: s.sipUsername);
-    _passwordCtrl = TextEditingController(text: s.sipPassword);
-    _displayNameCtrl = TextEditingController(text: s.displayName);
+    // Initialise with empty strings; _seedControllers() fills them once
+    // the async SharedPreferences load completes.
+    _usernameCtrl    = TextEditingController();
+    _passwordCtrl    = TextEditingController();
+    _displayNameCtrl = TextEditingController();
+  }
+
+  /// Called from build() via ref.listen — seeds controllers the first time
+  /// real values arrive from SharedPreferences (only if user hasn't typed).
+  void _seedControllers(SettingsState s) {
+    if (_controllersSeeded || _credentialsDirty) return;
+    if (s.sipUsername.isEmpty && s.sipPassword.isEmpty) return; // not loaded yet
+    _controllersSeeded = true;
+    _usernameCtrl.text    = s.sipUsername;
+    _passwordCtrl.text    = s.sipPassword;
+    _displayNameCtrl.text = s.displayName;
   }
 
   @override
@@ -196,6 +210,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final notifier = ref.read(settingsProvider.notifier);
+    // Seed credential controllers once SharedPreferences finishes loading
+    _seedControllers(settings);
 
     return SingleChildScrollView(
         padding: const EdgeInsets.all(16),
