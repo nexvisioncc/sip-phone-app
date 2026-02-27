@@ -31,6 +31,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- Phone / Telecom — required by flutter_callkit_incoming ConnectionService -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- Required for foregroundServiceType="phoneCall" on Android 14+ -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+
     <application
         android:label="Nexvision SIP"
         android:name=".Application"
@@ -41,7 +46,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleInstance"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
@@ -77,12 +82,12 @@
             android:foregroundServiceType="dataSync"
             tools:replace="android:exported" />
 
-        <!-- Call Kit Service -->
+        <!-- Call Kit Service — foregroundServiceType must be "phoneCall" to match plugin internals -->
         <service
             android:name="com.hiennv.flutter_callkit_incoming.CallkitIncomingService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="phoneCall" />
         
         <receiver
             android:name="com.hiennv.flutter_callkit_incoming.CallkitIncomingBroadcastReceiver"

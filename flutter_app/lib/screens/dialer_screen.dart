@@ -43,18 +43,22 @@ class DialerScreen extends ConsumerWidget {
             ),
           ),
 
-          // Backspace button
-          if (number.isNotEmpty)
-            Align(
-              alignment: Alignment.centerRight,
-              child: Padding(
-                padding: const EdgeInsets.only(right: 32),
-                child: IconButton(
-                  icon: Icon(Icons.backspace, color: Theme.of(context).colorScheme.onSurfaceVariant),
-                  onPressed: () => ref.read(dialedNumberProvider.notifier).backspace(),
-                ),
-              ),
-            ),
+          // Backspace button — always takes up the same height so the keypad never shifts
+          SizedBox(
+            height: 48,
+            child: number.isNotEmpty
+              ? Align(
+                  alignment: Alignment.centerRight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 32),
+                    child: IconButton(
+                      icon: Icon(Icons.backspace, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      onPressed: () => ref.read(dialedNumberProvider.notifier).backspace(),
+                    ),
+                  ),
+                )
+              : null,
+          ),
 
           const SizedBox(height: 16),
 

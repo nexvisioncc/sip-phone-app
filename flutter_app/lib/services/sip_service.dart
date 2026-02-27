@@ -11,7 +11,7 @@ import '../config/constants.dart';
 import 'api_service.dart';
 
 /// Connection state of the WebSocket link to the backend.
-enum WsState { disconnected, connecting, connected }
+enum WsState { disconnected, connecting, connected, authFailed }
 
 /// State of the current call leg.
 enum ActiveCallState { connecting, ringing, active, ended }
@@ -44,6 +44,8 @@ class CallService {
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
   String? _wsUrl;
+  String _wsUsername = '';
+  String _wsPassword = '';
   bool _disposed = false;
 
   WsState _wsState = WsState.disconnected;
@@ -82,8 +84,10 @@ class CallService {
   }
 
   // ── Connect / Reconnect ──────────────────────────────────────────────────
-  void connect(String wsUrl) {
+  void connect(String wsUrl, {String username = '', String password = ''}) {
     _wsUrl = wsUrl;
+    _wsUsername = username;
+    _wsPassword = password;
     _doDisconnect();
     _setWsState(WsState.connecting);
     _log.i('[CallService] Connecting to $wsUrl');
@@ -97,6 +101,8 @@ class CallService {
         onDone: _onClosed,
         onError: (_) => _onClosed(),
       );
+      // Send credentials immediately — backend requires auth as first message
+      _send({'type': 'auth', 'username': _wsUsername, 'password': _wsPassword});
     } catch (e) {
       _log.e('[CallService] Connect error: $e');
       _scheduleReconnect();
@@ -112,14 +118,17 @@ class CallService {
 
   void _onClosed() {
     _log.w('[CallService] WS closed');
-    _setWsState(WsState.disconnected);
-    _scheduleReconnect();
+    // Don't overwrite authFailed — user must fix credentials before reconnecting
+    if (_wsState != WsState.authFailed) {
+      _setWsState(WsState.disconnected);
+      _scheduleReconnect();
+    }
   }
 
   void _scheduleReconnect() {
     Future.delayed(const Duration(seconds: 5), () {
       if (_wsState == WsState.disconnected && _wsUrl != null) {
-        connect(_wsUrl!);
+        connect(_wsUrl!, username: _wsUsername, password: _wsPassword);
       }
     });
   }
@@ -144,6 +153,14 @@ class CallService {
     try {
       final msg = jsonDecode(data as String) as Map<String, dynamic>;
       switch (msg['type'] as String?) {
+        case 'auth_ok':
+          _dbg('[Auth] Authentication successful');
+          break;
+        case 'auth_failed':
+          _dbg('[Auth] Authentication failed: ${msg['reason']}');
+          _setWsState(WsState.authFailed);
+          _doDisconnect();
+          break;
         case 'registered':
           _setWsState(WsState.connected);
           _reRegisterFcmToken();
@@ -555,7 +572,9 @@ class CallService {
     if (_wsState != WsState.connected) {
       _dbg('call() — WS not connected, waiting up to 10 s…');
       final deadline = DateTime.now().add(const Duration(seconds: 10));
-      while (_wsState != WsState.connected && DateTime.now().isBefore(deadline)) {
+      while (_wsState != WsState.connected &&
+             _wsState != WsState.authFailed &&
+             DateTime.now().isBefore(deadline)) {
         await Future.delayed(const Duration(milliseconds: 500));
       }
       if (_wsState != WsState.connected) {

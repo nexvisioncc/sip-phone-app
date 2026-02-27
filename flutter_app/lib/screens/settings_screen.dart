@@ -86,8 +86,10 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
       runInBackground: prefs.getBool('run_in_background') ?? false,
       showIncomingNotification: prefs.getBool('show_incoming_notification') ?? true,
     );
-    // Connect to backend WebSocket on startup
-    CallService().connect(wsUrl);
+    // Connect to backend WebSocket on startup with stored credentials
+    final username = prefs.getString('sip_username') ?? '';
+    final password = prefs.getString('sip_password') ?? '';
+    CallService().connect(wsUrl, username: username, password: password);
   }
 
   Future<void> saveSettings(SettingsState newState) async {
@@ -101,12 +103,20 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     await prefs.setBool('auto_record', newState.autoRecord);
     await prefs.setBool('run_in_background', newState.runInBackground);
     await prefs.setBool('show_incoming_notification', newState.showIncomingNotification);
-    final oldWsUrl = state.wsUrl;
+    final oldUsername = state.sipUsername;
+    final oldPassword = state.sipPassword;
+    final oldWsUrl    = state.wsUrl;
     state = newState;
-    // Reconnect if the WebSocket URL changed, or currently disconnected (not just connecting)
+    // Reconnect when URL or credentials changed, or currently disconnected/authFailed.
+    // Always re-auth when credentials change — even if currently "connected" with old creds.
+    final credentialsChanged = oldUsername != newState.sipUsername ||
+        oldPassword != newState.sipPassword;
     if (oldWsUrl != newState.wsUrl ||
-        CallService().wsState == WsState.disconnected) {
-      CallService().connect(newState.wsUrl);
+        credentialsChanged ||
+        CallService().wsState == WsState.disconnected ||
+        CallService().wsState == WsState.authFailed) {
+      CallService().connect(newState.wsUrl,
+          username: newState.sipUsername, password: newState.sipPassword);
     }
     // Note: do NOT reconnect when wsState == connecting — let the in-progress attempt finish
   }
@@ -122,16 +132,29 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   WsState _wsState = WsState.disconnected;
 
+  // Local controllers for credential fields — only saved when "Save & Login" is tapped
+  late TextEditingController _usernameCtrl;
+  late TextEditingController _passwordCtrl;
+  late TextEditingController _displayNameCtrl;
+  bool _credentialsDirty = false;
+
   @override
   void initState() {
     super.initState();
     _wsState = CallService().wsState;
     CallService().onWsStateChanged = _onWsStateChanged;
+    final s = ref.read(settingsProvider);
+    _usernameCtrl = TextEditingController(text: s.sipUsername);
+    _passwordCtrl = TextEditingController(text: s.sipPassword);
+    _displayNameCtrl = TextEditingController(text: s.displayName);
   }
 
   @override
   void dispose() {
     CallService().onWsStateChanged = null;
+    _usernameCtrl.dispose();
+    _passwordCtrl.dispose();
+    _displayNameCtrl.dispose();
     super.dispose();
   }
 
@@ -139,25 +162,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (mounted) setState(() => _wsState = state);
   }
 
+  void _saveAndLogin() {
+    final settings = ref.read(settingsProvider);
+    final notifier = ref.read(settingsProvider.notifier);
+    notifier.saveSettings(settings.copyWith(
+      sipUsername: _usernameCtrl.text.trim(),
+      sipPassword: _passwordCtrl.text,
+      displayName: _displayNameCtrl.text.trim(),
+    ));
+    setState(() => _credentialsDirty = false);
+    FocusScope.of(context).unfocus();
+  }
+
   Color get _stateColor {
     switch (_wsState) {
-      case WsState.connected:
-        return Colors.green;
-      case WsState.disconnected:
-        return Colors.red;
-      case WsState.connecting:
-        return Colors.orange;
+      case WsState.connected:    return Colors.green;
+      case WsState.authFailed:   return Colors.red;
+      case WsState.disconnected: return Colors.red;
+      case WsState.connecting:   return Colors.orange;
     }
   }
 
   String get _stateLabel {
     switch (_wsState) {
-      case WsState.connected:
-        return 'Connected';
-      case WsState.disconnected:
-        return 'Disconnected';
-      case WsState.connecting:
-        return 'Connecting...';
+      case WsState.connected:    return 'Connected';
+      case WsState.authFailed:   return 'Authentication Failed';
+      case WsState.disconnected: return 'Disconnected';
+      case WsState.connecting:   return 'Connecting...';
     }
   }
 
@@ -171,7 +202,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // SIP Account Section
+            // ── Server Settings (top) ────────────────────────────────────────
+            _SectionHeader(
+              icon: Icons.dns,
+              title: 'Server Settings',
+              subtitle: 'Advanced: Only change if you know what you\'re doing',
+            ),
+            const SizedBox(height: 16),
+            _SettingsCard(
+              children: [
+                _TextField(
+                  label: 'API URL',
+                  hint: 'https://sip-api.nexvision.cc',
+                  value: settings.apiUrl,
+                  onChanged: (v) => notifier.saveSettings(settings.copyWith(apiUrl: v)),
+                ),
+                _TextField(
+                  label: 'WebSocket URL',
+                  hint: 'wss://sip-api.nexvision.cc/ws',
+                  value: settings.wsUrl,
+                  onChanged: (v) => notifier.saveSettings(settings.copyWith(wsUrl: v)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+
+            // ── SIP Account ──────────────────────────────────────────────────
             _SectionHeader(
               icon: Icons.phone,
               title: 'SIP Account',
@@ -203,11 +259,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                   ),
                   const Spacer(),
-                  if (_wsState != WsState.connected)
+                  if (_wsState == WsState.authFailed)
+                    TextButton.icon(
+                      onPressed: _saveAndLogin,
+                      icon: const Icon(Icons.login, size: 16),
+                      label: const Text('Login'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: _stateColor,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                    )
+                  else if (_wsState == WsState.disconnected)
                     TextButton.icon(
                       onPressed: () {
                         final s = ref.read(settingsProvider);
-                        CallService().connect(s.wsUrl);
+                        CallService().connect(s.wsUrl,
+                            username: s.sipUsername, password: s.sipPassword);
                       },
                       icon: const Icon(Icons.refresh, size: 16),
                       label: const Text('Reconnect'),
@@ -219,58 +286,80 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ],
               ),
             ),
+            // Auth error banner
+            if (_wsState == WsState.authFailed) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.red.shade200),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.lock_outline, color: Colors.red.shade700, size: 18),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Invalid username or password. Update your credentials and tap Save & Login.',
+                        style: TextStyle(color: Colors.red.shade700, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             _SettingsCard(
               children: [
-                _TextField(
+                _ControlledTextField(
                   label: 'SIP Username',
                   hint: 'e.g., herberttung',
-                  value: settings.sipUsername,
-                  onChanged: (v) => notifier.saveSettings(settings.copyWith(sipUsername: v)),
+                  controller: _usernameCtrl,
+                  onChanged: (_) => setState(() => _credentialsDirty = true),
                 ),
-                _TextField(
+                _ControlledTextField(
                   label: 'SIP Password',
                   hint: 'Your SIP password',
-                  value: settings.sipPassword,
+                  controller: _passwordCtrl,
                   obscureText: true,
-                  onChanged: (v) => notifier.saveSettings(settings.copyWith(sipPassword: v)),
+                  onChanged: (_) => setState(() => _credentialsDirty = true),
                 ),
-                _TextField(
+                _ControlledTextField(
                   label: 'Display Name',
                   hint: 'Name shown to others',
-                  value: settings.displayName,
-                  onChanged: (v) => notifier.saveSettings(settings.copyWith(displayName: v)),
+                  controller: _displayNameCtrl,
+                  onChanged: (_) => setState(() => _credentialsDirty = true),
+                ),
+                // Test Connection — placed before Save & Login
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => _testConnection(context, settings),
+                    icon: const Icon(Icons.network_check, size: 18),
+                    label: const Text('Test Connection'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _saveAndLogin,
+                    icon: const Icon(Icons.login, size: 18),
+                    label: Text(_credentialsDirty ? 'Save & Login *' : 'Save & Login'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _credentialsDirty
+                          ? Theme.of(context).colorScheme.primary
+                          : Theme.of(context).colorScheme.secondary,
+                    ),
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 24),
 
-            // Server Settings Section
-            _SectionHeader(
-              icon: Icons.dns,
-              title: 'Server Settings',
-              subtitle: 'Advanced: Only change if you know what you\'re doing',
-            ),
-            const SizedBox(height: 16),
-            _SettingsCard(
-              children: [
-                _TextField(
-                  label: 'API URL',
-                  hint: 'https://sip-api.nexvision.cc',
-                  value: settings.apiUrl,
-                  onChanged: (v) => notifier.saveSettings(settings.copyWith(apiUrl: v)),
-                ),
-                _TextField(
-                  label: 'WebSocket URL',
-                  hint: 'wss://sip-api.nexvision.cc/ws',
-                  value: settings.wsUrl,
-                  onChanged: (v) => notifier.saveSettings(settings.copyWith(wsUrl: v)),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-
-            // Call Recording Section
+            // ── Call Recording ───────────────────────────────────────────────
             _SectionHeader(
               icon: Icons.fiber_manual_record,
               title: 'Call Recording',
@@ -294,7 +383,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 24),
 
-            // Notifications & Background Section
+            // ── Notifications & Background ───────────────────────────────────
             _SectionHeader(
               icon: Icons.notifications_active,
               title: 'Notifications & Background',
@@ -338,7 +427,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 24),
 
-            // Quick Actions
+            // ── Quick Setup ──────────────────────────────────────────────────
             _SectionHeader(
               icon: Icons.bolt,
               title: 'Quick Setup',
@@ -367,7 +456,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 32),
 
-            // Mic Test Section
+            // ── Microphone Test ──────────────────────────────────────────────
             _SectionHeader(
               icon: Icons.mic,
               title: 'Microphone Test',
@@ -376,17 +465,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             const SizedBox(height: 16),
             const _MicTestCard(),
             const SizedBox(height: 24),
-
-            // Test Connection Button
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: () => _testConnection(context, settings),
-                icon: const Icon(Icons.network_check),
-                label: const Text('Test Connection'),
-              ),
-            ),
-            const SizedBox(height: 16),
 
             // Version Info
             Center(
@@ -403,6 +481,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   void _testConnection(BuildContext context, SettingsState settings) async {
+    // Use credentials from the local controllers (may be unsaved)
+    final username = _usernameCtrl.text.trim();
+    final password = _passwordCtrl.text;
+
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -417,54 +499,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ),
     );
 
-    try {
-      await Future.delayed(const Duration(seconds: 1));
-      if (context.mounted) {
-        Navigator.pop(context);
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.green),
-                SizedBox(width: 8),
-                Text('Success'),
-              ],
-            ),
-            content: const Text('Connection to SIP server successful!'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('OK'),
-              ),
-            ],
-          ),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        Navigator.pop(context);
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Row(
-              children: [
-                Icon(Icons.error, color: Colors.red),
-                SizedBox(width: 8),
-                Text('Failed'),
-              ],
-            ),
-            content: Text('Connection failed: $e'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('OK'),
-              ),
-            ],
-          ),
-        );
-      }
+    // Trigger a real reconnect with current credentials and wait up to 8 s
+    CallService().connect(settings.wsUrl, username: username, password: password);
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (CallService().wsState == WsState.connecting &&
+        DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 300));
     }
+
+    if (!context.mounted) return;
+    Navigator.pop(context); // close spinner
+
+    final finalState = CallService().wsState;
+    final bool ok = finalState == WsState.connected;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(ok ? Icons.check_circle : Icons.error,
+                color: ok ? Colors.green : Colors.red),
+            const SizedBox(width: 8),
+            Text(ok ? 'Success' : 'Failed'),
+          ],
+        ),
+        content: Text(ok
+            ? 'Connected and authenticated successfully.'
+            : finalState == WsState.authFailed
+                ? 'Authentication failed — wrong username or password.'
+                : 'Could not reach the server. Check the WebSocket URL.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -527,6 +598,41 @@ class _SettingsCard extends StatelessWidget {
         child: Column(
           children: children,
         ),
+      ),
+    );
+  }
+}
+
+/// Credential fields — uses a persistent controller so typing doesn't trigger reconnects.
+class _ControlledTextField extends StatelessWidget {
+  final String label;
+  final String hint;
+  final TextEditingController controller;
+  final bool obscureText;
+  final ValueChanged<String>? onChanged;
+
+  const _ControlledTextField({
+    required this.label,
+    required this.hint,
+    required this.controller,
+    this.obscureText = false,
+    this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: TextField(
+        controller: controller,
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hint,
+          border: const OutlineInputBorder(),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        ),
+        obscureText: obscureText,
+        onChanged: onChanged,
       ),
     );
   }

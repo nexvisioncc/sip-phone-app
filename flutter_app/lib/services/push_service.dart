@@ -1,8 +1,10 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
 import 'package:flutter_callkit_incoming/entities/entities.dart';
 import 'package:logger/logger.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/constants.dart';
 import 'api_service.dart';
@@ -17,8 +19,27 @@ class PushService {
   
   Future<void> initialize() async {
     _logger.i('Initializing push service');
-    
-    // Request permissions
+
+    // POST_NOTIFICATIONS — dangerous runtime permission required on Android 13+
+    // Must be granted so the incoming call notification can appear when app is closed.
+    if (await Permission.notification.isDenied) {
+      final status = await Permission.notification.request();
+      _logger.i('Notification permission: $status');
+      if (status.isPermanentlyDenied) {
+        _logger.w('Notification permission permanently denied — opening settings');
+        await openAppSettings();
+      }
+    }
+
+    // USE_FULL_SCREEN_INTENT — required for full-screen call screen on locked device.
+    // On Android 14+ this must be explicitly granted by the user.
+    final canFullScreen = await FlutterCallkitIncoming.canUseFullScreenIntent();
+    if (!canFullScreen) {
+      _logger.i('Requesting USE_FULL_SCREEN_INTENT permission');
+      await FlutterCallkitIncoming.requestFullIntentPermission();
+    }
+
+    // FCM permission (covers iOS; on Android POST_NOTIFICATIONS above handles it)
     final settings = await _fcm.requestPermission(
       alert: true,
       badge: true,
@@ -45,9 +66,6 @@ class PushService {
     
     // Handle foreground messages
     FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
-    
-    // Handle background/terminated messages
-    FirebaseMessaging.onBackgroundMessage(_handleBackgroundMessage);
     
     // Handle call kit events
     FlutterCallkitIncoming.onEvent.listen((event) {
@@ -146,10 +164,13 @@ class PushService {
   }
 }
 
-// Background handler - must be top-level, runs in a separate isolate
+// Background handler - must be top-level, runs in a separate isolate.
+// Registered in main() BEFORE runApp() so the callback handle is stored
+// in shared prefs and survives app termination.
 @pragma('vm:entry-point')
-Future<void> _handleBackgroundMessage(RemoteMessage message) async {
+Future<void> handleBackgroundFcmMessage(RemoteMessage message) async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   if (message.data['type'] == 'incoming_call') {
     final params = CallKitParams(
       id: message.data['call_id'] ?? DateTime.now().millisecondsSinceEpoch.toString(),

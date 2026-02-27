@@ -65,6 +65,10 @@ spec:
           const SIP_USER    = 'herberttung';
           const SIP_PASS    = '87828Idiot';
           const SIP_DOMAIN  = 'sip.nexvision.cc';
+          // App-level credentials — Flutter clients must send {type:'auth'} first.
+          // Override via AUTH_USER / AUTH_PASS env vars for production.
+          const AUTH_USER   = process.env.AUTH_USER || SIP_USER;
+          const AUTH_PASS   = process.env.AUTH_PASS || SIP_PASS;
 
           // ── State ────────────────────────────────────────────────────────
           let sipWs         = null;
@@ -652,35 +656,53 @@ spec:
           }, 25000);
 
           wss.on('connection', (ws) => {
-            console.log('[Flutter] Client connected');
-            flutterWs = ws;
+            console.log('[Flutter] Client connected — awaiting auth');
             ws.isAlive = true;
+            ws.authenticated = false;
             ws.on('pong', () => { ws.isAlive = true; });
-
-            // Immediately tell the client our current state
-            if (sipRegistered) ws.send(JSON.stringify({ type: 'registered' }));
-
-            // Re-sync any in-progress call the client missed due to WS drop
-            if (pendingInvite) {
-              const callerMatch = pendingInvite.from.match(/sip:([^@>]+)/);
-              const caller = callerMatch ? callerMatch[1] : 'Unknown';
-              ws.send(JSON.stringify({
-                type: 'incoming_call',
-                call_id: pendingInvite.callId,
-                from: caller,
-                sdp_offer: pendingInvite.body,
-              }));
-            } else if (outgoingInvite) {
-              // Outgoing call still ringing — re-send ringing so Flutter updates UI
-              ws.send(JSON.stringify({ type: 'call_state', call_id: outgoingInvite.callId, state: 'ringing' }));
-            } else if (activeDialog) {
-              // Active call — re-send active + SDP answer so Flutter can complete WebRTC ICE
-              ws.send(JSON.stringify({ type: 'call_state', call_id: activeDialog.callId, state: 'active', sdp_answer: activeCallSdpAnswer || '' }));
-            }
 
             ws.on('message', (data) => {
               let msg;
               try { msg = JSON.parse(data); } catch { return; }
+
+              // ── Auth gate: first message must be {type:'auth'} ──────────
+              if (!ws.authenticated) {
+                if (msg.type !== 'auth') {
+                  ws.send(JSON.stringify({ type: 'auth_failed', reason: 'Authentication required' }));
+                  ws.close();
+                  return;
+                }
+                if (msg.username !== AUTH_USER || msg.password !== AUTH_PASS) {
+                  console.warn(`[Flutter] Auth failed for "${msg.username}"`);
+                  ws.send(JSON.stringify({ type: 'auth_failed', reason: 'Invalid credentials' }));
+                  ws.close();
+                  return;
+                }
+                ws.authenticated = true;
+                flutterWs = ws;
+                console.log(`[Flutter] Auth OK for "${msg.username}"`);
+                ws.send(JSON.stringify({ type: 'auth_ok' }));
+
+                // Sync current state after auth
+                if (sipRegistered) ws.send(JSON.stringify({ type: 'registered' }));
+                if (pendingInvite) {
+                  const callerMatch = pendingInvite.from.match(/sip:([^@>]+)/);
+                  const caller = callerMatch ? callerMatch[1] : 'Unknown';
+                  ws.send(JSON.stringify({
+                    type: 'incoming_call',
+                    call_id: pendingInvite.callId,
+                    from: caller,
+                    sdp_offer: pendingInvite.body,
+                  }));
+                } else if (outgoingInvite) {
+                  ws.send(JSON.stringify({ type: 'call_state', call_id: outgoingInvite.callId, state: 'ringing' }));
+                } else if (activeDialog) {
+                  ws.send(JSON.stringify({ type: 'call_state', call_id: activeDialog.callId, state: 'active', sdp_answer: activeCallSdpAnswer || '' }));
+                }
+                return;
+              }
+
+              // ── Authenticated — handle call messages ────────────────────
               switch (msg.type) {
                 case 'call':    initiateOutgoingCall(msg.number, msg.sdp_offer, msg.call_id); break;
                 case 'answer':  answerCall(msg.call_id, msg.sdp_answer); break;
