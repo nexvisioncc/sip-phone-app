@@ -1,0 +1,21 @@
+name: Auto Deploy K8s Resources
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'k8s/**'
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Apply Kubernetes resources
+        run: |
+          kubectl apply -f k8s/
