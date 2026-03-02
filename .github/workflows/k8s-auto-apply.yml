@@ -16,6 +16,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
       - name: Apply Kubernetes resources
         run: |
           kubectl apply -f k8s/
