@@ -37,7 +37,7 @@ spec:
       resources:
         requests:
           storage: 1Gi
-      storageClassName: vultr-block-storage
+      storageClassName: local-path
 ---
 apiVersion: v1
 kind: Service
@@ -99,7 +99,7 @@ spec:
       resources:
         requests:
           storage: 5Gi
-      storageClassName: vultr-block-storage
+      storageClassName: local-path
 ---
 apiVersion: v1
 kind: Service
